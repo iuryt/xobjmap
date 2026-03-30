@@ -69,7 +69,7 @@ def test_streamfunction_recovers_vortex():
     u_recon = -dpsi_dy
     v_recon = dpsi_dx
 
-    corr_u = np.corrcoef(u_recon.ravel(), u_true.ravel())[0, 1]
-    corr_v = np.corrcoef(v_recon.ravel(), v_true.ravel())[0, 1]
-    assert corr_u > 0.9
-    assert corr_v > 0.9
+    nrmse_u = np.sqrt(np.mean((u_recon - u_true)**2)) / np.sqrt(np.mean(u_true**2))
+    nrmse_v = np.sqrt(np.mean((v_recon - v_true)**2)) / np.sqrt(np.mean(v_true**2))
+    assert nrmse_u < 0.3, f"u nRMSE = {nrmse_u:.3f}"
+    assert nrmse_v < 0.3, f"v nRMSE = {nrmse_v:.3f}"
