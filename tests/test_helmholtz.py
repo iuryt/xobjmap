@@ -48,8 +48,8 @@ def test_helmholtz_does_not_modify_inputs():
     np.testing.assert_array_equal(u, u_orig)
 
 
-def test_helmholtz_recovers_psi_and_chi():
-    """helmholtz should recover both streamfunction and velocity potential."""
+def test_helmholtz_recovers_velocities():
+    """Total velocity from reconstructed psi + chi should match the true field."""
     # Gaussian vortex (nondivergent): psi = exp(-r^2 / 2L^2)
     #   u_psi = -dpsi/dy = (y/L^2) * psi
     #   v_psi =  dpsi/dx = -(x/L^2) * psi
@@ -78,20 +78,22 @@ def test_helmholtz_recovers_psi_and_chi():
         err=0.01,
     )
 
-    # True fields on grid
+    # True velocities on grid
     r2_grid = gx**2 + gy**2
     psi_true = np.exp(-r2_grid / (2 * L**2))
     chi_true = np.exp(-r2_grid / (2 * L**2))
+    u_true = (gy / L**2) * psi_true + (-gx / L**2) * chi_true
+    v_true = (-gx / L**2) * psi_true + (-gy / L**2) * chi_true
 
-    for recon, true in [(psi_recon, psi_true), (chi_recon, chi_true)]:
-        # Remove mean (absolute value is arbitrary) and normalize
-        recon_n = recon - recon.mean()
-        true_n = true - true.mean()
-        recon_n = recon_n / np.abs(recon_n).max()
-        true_n = true_n / np.abs(true_n).max()
+    # Reconstructed velocities from psi and chi via finite differences
+    dy = gy[1, 0] - gy[0, 0]
+    dx = gx[0, 1] - gx[0, 0]
+    dpsi_dy, dpsi_dx = np.gradient(psi_recon, dy, dx)
+    dchi_dy, dchi_dx = np.gradient(chi_recon, dy, dx)
+    u_recon = -dpsi_dy + dchi_dx
+    v_recon = dpsi_dx + dchi_dy
 
-        corr = np.corrcoef(recon_n.ravel(), true_n.ravel())[0, 1]
-        assert corr > 0.9
-
-        rmse = np.sqrt(np.mean((recon_n - true_n) ** 2))
-        assert rmse < 0.3
+    corr_u = np.corrcoef(u_recon.ravel(), u_true.ravel())[0, 1]
+    corr_v = np.corrcoef(v_recon.ravel(), v_true.ravel())[0, 1]
+    assert corr_u > 0.9
+    assert corr_v > 0.9

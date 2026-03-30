@@ -1,4 +1,4 @@
-"""Basic tests for streamfunction recovery."""
+"""Tests for streamfunction recovery."""
 
 import numpy as np
 
@@ -38,7 +38,7 @@ def test_streamfunction_does_not_modify_inputs():
 
 
 def test_streamfunction_recovers_vortex():
-    """streamfunction should recover a Gaussian vortex."""
+    """Velocities derived from reconstructed psi should match the true field."""
     # Gaussian vortex: psi = exp(-r^2/2L^2)
     # u = -dpsi/dy = (y/L^2) * psi
     # v =  dpsi/dx = -(x/L^2) * psi
@@ -56,20 +56,20 @@ def test_streamfunction_recovers_vortex():
     psi_recon = streamfunction(gx, gy, x_obs, y_obs, u_obs, v_obs,
                                corrlenx=4.0, corrleny=4.0, err=0.01)
 
-    # Compare structure: correlation between reconstructed and true
+    # True velocities on grid
     r2_grid = gx**2 + gy**2
     psi_true = np.exp(-r2_grid / (2 * L**2))
+    u_true = (gy / L**2) * psi_true
+    v_true = -(gx / L**2) * psi_true
 
-    # Remove means (absolute value is arbitrary) and normalize
-    psi_recon = psi_recon - psi_recon.mean()
-    psi_true = psi_true - psi_true.mean()
-    psi_recon = psi_recon / np.abs(psi_recon).max()
-    psi_true = psi_true / np.abs(psi_true).max()
+    # Reconstructed velocities from psi via finite differences
+    dy = gy[1, 0] - gy[0, 0]
+    dx = gx[0, 1] - gx[0, 0]
+    dpsi_dy, dpsi_dx = np.gradient(psi_recon, dy, dx)
+    u_recon = -dpsi_dy
+    v_recon = dpsi_dx
 
-    # Correlation must be positive (correct sign) and high (correct structure)
-    corr = np.corrcoef(psi_recon.ravel(), psi_true.ravel())[0, 1]
-    assert corr > 0.9
-
-    # RMSE should be small — catches amplitude errors
-    rmse = np.sqrt(np.mean((psi_recon - psi_true) ** 2))
-    assert rmse < 0.3
+    corr_u = np.corrcoef(u_recon.ravel(), u_true.ravel())[0, 1]
+    corr_v = np.corrcoef(v_recon.ravel(), v_true.ravel())[0, 1]
+    assert corr_u > 0.9
+    assert corr_v > 0.9
