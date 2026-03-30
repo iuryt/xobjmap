@@ -35,19 +35,27 @@ target = xr.Dataset(
 )
 
 # Scalar objective analysis
-result = obs.xobjmap.scalar_interp(
+result = obs.xobjmap.scalar(
     "temp", target, corrlen={"lon": 1.0, "lat": 0.5}, err=0.1
 )
 result.temp   # interpolated field
 result.error  # normalized error map
 
-# Vectorial objective analysis
+# Streamfunction recovery
 obs_vel = xr.Dataset(
     {"u": ("station", u_data), "v": ("station", v_data)},
     coords={"lon": ("station", lons), "lat": ("station", lats)},
 )
-psi = obs_vel.xobjmap.vector_interp(
+psi = obs_vel.xobjmap.streamfunction(
     "u", "v", target, corrlen={"lon": 1.0, "lat": 0.5}, err=0.1
+)
+
+# Helmholtz decomposition
+result = obs_vel.xobjmap.helmholtz(
+    "u", "v", target,
+    corrlen_psi={"lon": 1.0, "lat": 0.5},
+    corrlen_chi={"lon": 1.0, "lat": 0.5},
+    err=0.1,
 )
 ```
 
@@ -55,7 +63,7 @@ psi = obs_vel.xobjmap.vector_interp(
 
 ### Accessor methods
 
-#### `ds.xobjmap.scalar_interp(var, target, corrlen, err)`
+#### `ds.xobjmap.scalar(var, target, corrlen, err)`
 
 Interpolates a scalar variable from scattered observations onto target locations.
 
@@ -68,9 +76,9 @@ Interpolates a scalar variable from scattered observations onto target locations
 
 Returns an `xr.Dataset` with the interpolated field and an `error` variable.
 
-#### `ds.xobjmap.vector_interp(u_var, v_var, target, corrlen, err, b=0)`
+#### `ds.xobjmap.streamfunction(u_var, v_var, target, corrlen, err, b=0)`
 
-Recovers the streamfunction from scattered velocity observations.
+Recovers the streamfunction from scattered velocity observations, assuming purely nondivergent flow.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -83,20 +91,60 @@ Recovers the streamfunction from scattered velocity observations.
 
 Returns an `xr.Dataset` with a `psi` (streamfunction) variable.
 
+#### `ds.xobjmap.velocity_potential(u_var, v_var, target, corrlen, err, b=0)`
+
+Recovers the velocity potential from scattered velocity observations, assuming purely irrotational flow.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `u_var` | `str` | Eastward velocity variable name |
+| `v_var` | `str` | Northward velocity variable name |
+| `target` | `xr.Dataset` | Target grid coordinates |
+| `corrlen` | `dict` or `float` | Correlation length scales (same units as coordinates) |
+| `err` | `float` | Normalized error variance (0 to 1) |
+| `b` | `float` | Mean correction parameter (default: 0) |
+
+Returns an `xr.Dataset` with a `chi` (velocity potential) variable.
+
+#### `ds.xobjmap.helmholtz(u_var, v_var, target, corrlen_psi, corrlen_chi, err, b=0)`
+
+Helmholtz decomposition: jointly recovers the streamfunction and velocity potential from scattered velocity observations.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `u_var` | `str` | Eastward velocity variable name |
+| `v_var` | `str` | Northward velocity variable name |
+| `target` | `xr.Dataset` | Target grid coordinates |
+| `corrlen_psi` | `dict` or `float` | Correlation length scales for the streamfunction |
+| `corrlen_chi` | `dict` or `float` | Correlation length scales for the velocity potential |
+| `err` | `float` | Normalized error variance (0 to 1) |
+| `b` | `float` | Mean correction parameter (default: 0) |
+
+Returns an `xr.Dataset` with `psi` (streamfunction) and `chi` (velocity potential) variables.
+
 ### Low-level functions
 
-#### `xobjmap.scaloa(xc, yc, x, y, t, corrlenx, corrleny, err)`
+#### `xobjmap.scalar(xc, yc, x, y, t, corrlenx, corrleny, err)`
 
 Scalar Gauss-Markov estimation. Returns `(tp, ep)` if `t` is provided, or just `ep` (error map) if `t` is `None`.
 
-#### `xobjmap.vectoa(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0)`
+#### `xobjmap.streamfunction(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0)`
 
-Vectorial objective analysis. Returns the streamfunction on the target grid `(xc, yc)`.
+Recovers the streamfunction on the target grid `(xc, yc)`, assuming nondivergent flow.
+
+#### `xobjmap.velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0)`
+
+Recovers the velocity potential on the target grid `(xc, yc)`, assuming irrotational flow.
+
+#### `xobjmap.helmholtz(xc, yc, x, y, u, v, corrlenx_psi, corrleny_psi, corrlenx_chi, corrleny_chi, err, b=0)`
+
+Helmholtz decomposition. Returns `(psi, chi)` on the target grid.
 
 ## Notes
 
 - Correlation lengths must be in the **same units** as the coordinates. If working with lon/lat in degrees, either express corrlen in degrees or convert to a projected coordinate system first.
 - The streamfunction convention follows Bretherton et al. (1976): `u = -dpsi/dy`, `v = dpsi/dx`.
+- The velocity potential convention: `u = dchi/dx`, `v = dchi/dy`.
 
 ## References
 

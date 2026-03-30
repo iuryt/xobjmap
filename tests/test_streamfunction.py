@@ -1,12 +1,12 @@
-"""Basic tests for vectorial objective analysis."""
+"""Basic tests for streamfunction recovery."""
 
 import numpy as np
 
-from xobjmap import vectoa
+from xobjmap import streamfunction
 
 
-def test_vectoa_returns_correct_shape():
-    """vectoa output shape should match the target grid."""
+def test_streamfunction_returns_correct_shape():
+    """streamfunction output shape should match the target grid."""
     gx, gy = np.meshgrid(np.linspace(0, 10, 8), np.linspace(0, 10, 6))
 
     rng = np.random.default_rng(42)
@@ -15,13 +15,13 @@ def test_vectoa_returns_correct_shape():
     u = rng.standard_normal(20)
     v = rng.standard_normal(20)
 
-    psi = vectoa(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=3.0, err=0.1)
+    psi = streamfunction(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=3.0, err=0.1)
 
     assert psi.shape == gx.shape
 
 
-def test_vectoa_does_not_modify_inputs():
-    """vectoa should not modify the input arrays."""
+def test_streamfunction_does_not_modify_inputs():
+    """streamfunction should not modify the input arrays."""
     gx, gy = np.meshgrid(np.linspace(0, 10, 5), np.linspace(0, 10, 5))
     x = np.array([2.0, 5.0, 8.0])
     y = np.array([2.0, 5.0, 8.0])
@@ -30,15 +30,15 @@ def test_vectoa_does_not_modify_inputs():
 
     gx_orig, x_orig, u_orig = gx.copy(), x.copy(), u.copy()
 
-    vectoa(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=1.5, err=0.1)
+    streamfunction(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=1.5, err=0.1)
 
     np.testing.assert_array_equal(gx, gx_orig)
     np.testing.assert_array_equal(x, x_orig)
     np.testing.assert_array_equal(u, u_orig)
 
 
-def test_vectoa_recovers_vortex():
-    """vectoa should recover a Gaussian vortex streamfunction."""
+def test_streamfunction_recovers_vortex():
+    """streamfunction should recover a Gaussian vortex."""
     # Gaussian vortex: psi = exp(-r^2/2L^2)
     # u = -dpsi/dy = (y/L^2) * psi
     # v =  dpsi/dx = -(x/L^2) * psi
@@ -53,8 +53,8 @@ def test_vectoa_recovers_vortex():
 
     gx, gy = np.meshgrid(np.linspace(-6, 6, 20), np.linspace(-6, 6, 20))
 
-    psi_recon = vectoa(gx, gy, x_obs, y_obs, u_obs, v_obs,
-                       corrlenx=4.0, corrleny=4.0, err=0.01)
+    psi_recon = streamfunction(gx, gy, x_obs, y_obs, u_obs, v_obs,
+                               corrlenx=4.0, corrleny=4.0, err=0.01)
 
     # Compare structure: correlation between reconstructed and true
     r2_grid = gx**2 + gy**2

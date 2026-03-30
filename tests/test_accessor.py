@@ -6,8 +6,8 @@ import xarray as xr
 import xobjmap
 
 
-def test_scalar_interp_returns_dataset():
-    """scalar_interp should return an xr.Dataset with var and error."""
+def test_scalar_returns_dataset():
+    """scalar should return an xr.Dataset with var and error."""
     rng = np.random.default_rng(42)
     obs = xr.Dataset(
         {"temp": ("station", 2 * rng.uniform(0, 10, 30) + 3 * rng.uniform(0, 10, 30))},
@@ -23,7 +23,7 @@ def test_scalar_interp_returns_dataset():
         }
     )
 
-    result = obs.xobjmap.scalar_interp("temp", target, corrlen={"lon": 3.0, "lat": 3.0}, err=0.1)
+    result = obs.xobjmap.scalar("temp", target, corrlen={"lon": 3.0, "lat": 3.0}, err=0.1)
 
     assert isinstance(result, xr.Dataset)
     assert "temp" in result
@@ -32,8 +32,8 @@ def test_scalar_interp_returns_dataset():
     assert result["temp"].shape == (8, 10)
 
 
-def test_scalar_interp_isotropic_corrlen():
-    """scalar_interp should accept a scalar corrlen for isotropic case."""
+def test_scalar_isotropic_corrlen():
+    """scalar should accept a scalar corrlen for isotropic case."""
     rng = np.random.default_rng(42)
     obs = xr.Dataset(
         {"temp": ("station", rng.standard_normal(20))},
@@ -46,12 +46,12 @@ def test_scalar_interp_isotropic_corrlen():
         coords={"lon": np.linspace(1, 9, 5), "lat": np.linspace(1, 9, 5)}
     )
 
-    result = obs.xobjmap.scalar_interp("temp", target, corrlen=3.0, err=0.1)
+    result = obs.xobjmap.scalar("temp", target, corrlen=3.0, err=0.1)
 
     assert result["temp"].shape == (5, 5)
 
 
-def test_scalar_interp_error_bounded():
+def test_scalar_error_bounded():
     """Error values should be between 0 and 1."""
     rng = np.random.default_rng(42)
     obs = xr.Dataset(
@@ -65,14 +65,14 @@ def test_scalar_interp_error_bounded():
         coords={"lon": np.linspace(0, 10, 10), "lat": np.linspace(0, 10, 10)}
     )
 
-    result = obs.xobjmap.scalar_interp("temp", target, corrlen=3.0, err=0.1)
+    result = obs.xobjmap.scalar("temp", target, corrlen=3.0, err=0.1)
 
     assert np.all(result["error"].values >= 0)
     assert np.all(result["error"].values <= 1)
 
 
-def test_vector_interp_returns_psi():
-    """vector_interp should return an xr.Dataset with psi."""
+def test_streamfunction_returns_psi():
+    """streamfunction should return an xr.Dataset with psi."""
     rng = np.random.default_rng(42)
     obs = xr.Dataset(
         {
@@ -88,9 +88,66 @@ def test_vector_interp_returns_psi():
         coords={"lon": np.linspace(2, 8, 6), "lat": np.linspace(2, 8, 5)}
     )
 
-    result = obs.xobjmap.vector_interp("u", "v", target, corrlen={"lon": 3.0, "lat": 3.0}, err=0.1)
+    result = obs.xobjmap.streamfunction("u", "v", target, corrlen={"lon": 3.0, "lat": 3.0}, err=0.1)
 
     assert isinstance(result, xr.Dataset)
     assert "psi" in result
     assert result["psi"].dims == ("lat", "lon")
     assert result["psi"].shape == (5, 6)
+
+
+def test_velocity_potential_returns_chi():
+    """velocity_potential should return an xr.Dataset with chi."""
+    rng = np.random.default_rng(42)
+    obs = xr.Dataset(
+        {
+            "u": ("station", rng.standard_normal(20)),
+            "v": ("station", rng.standard_normal(20)),
+        },
+        coords={
+            "lon": ("station", rng.uniform(1, 9, 20)),
+            "lat": ("station", rng.uniform(1, 9, 20)),
+        },
+    )
+    target = xr.Dataset(
+        coords={"lon": np.linspace(2, 8, 6), "lat": np.linspace(2, 8, 5)}
+    )
+
+    result = obs.xobjmap.velocity_potential("u", "v", target, corrlen={"lon": 3.0, "lat": 3.0}, err=0.1)
+
+    assert isinstance(result, xr.Dataset)
+    assert "chi" in result
+    assert result["chi"].dims == ("lat", "lon")
+    assert result["chi"].shape == (5, 6)
+
+
+def test_helmholtz_returns_psi_and_chi():
+    """helmholtz should return an xr.Dataset with psi and chi."""
+    rng = np.random.default_rng(42)
+    obs = xr.Dataset(
+        {
+            "u": ("station", rng.standard_normal(20)),
+            "v": ("station", rng.standard_normal(20)),
+        },
+        coords={
+            "lon": ("station", rng.uniform(1, 9, 20)),
+            "lat": ("station", rng.uniform(1, 9, 20)),
+        },
+    )
+    target = xr.Dataset(
+        coords={"lon": np.linspace(2, 8, 6), "lat": np.linspace(2, 8, 5)}
+    )
+
+    result = obs.xobjmap.helmholtz(
+        "u", "v", target,
+        corrlen_psi={"lon": 3.0, "lat": 3.0},
+        corrlen_chi={"lon": 3.0, "lat": 3.0},
+        err=0.1,
+    )
+
+    assert isinstance(result, xr.Dataset)
+    assert "psi" in result
+    assert "chi" in result
+    assert result["psi"].dims == ("lat", "lon")
+    assert result["psi"].shape == (5, 6)
+    assert result["chi"].shape == (5, 6)

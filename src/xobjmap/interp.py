@@ -5,7 +5,67 @@ Core interpolation functions using Gauss-Markov optimal estimation.
 import numpy as np
 
 
-def scaloa(xc, yc, x, y, t=None, corrlenx=None, corrleny=None, err=None):
+def _pairwise(x1, y1, x2, y2):
+    """Pairwise differences and squared distances between two point sets.
+
+    Returns
+    -------
+    dx : ndarray, shape (n1, n2)
+        x2[j] - x1[i] for each pair.
+    dy : ndarray, shape (n1, n2)
+        y2[j] - y1[i] for each pair.
+    d2 : ndarray, shape (n1, n2)
+        Squared Euclidean distance for each pair.
+    """
+    n1, n2 = len(x1), len(x2)
+    dx = np.tile(x2, (n1, 1)) - np.tile(x1, (n2, 1)).T
+    dy = np.tile(y2, (n1, 1)) - np.tile(y1, (n2, 1)).T
+    return dx, dy, dx**2 + dy**2
+
+
+def _velocity_cov_block(t, d2, lambd, bmo, nondivergent=True):
+    """Build a 2n x 2n velocity-velocity covariance contribution.
+
+    For a nondivergent field (streamfunction), the longitudinal covariance
+    is R = exp(-lambda*d2) and the transverse is S = R*(1 - 2*lambda*d2).
+    For an irrotational field (velocity potential), R and S swap.
+
+    Parameters
+    ----------
+    t : ndarray, shape (n, n)
+        Angles between point pairs.
+    d2 : ndarray, shape (n, n)
+        Squared distances between point pairs.
+    lambd : float
+        Inverse squared correlation length (1 / corrlen**2).
+    bmo : float
+        Mean correction offset (b * err / lambd).
+    nondivergent : bool
+        True for streamfunction, False for velocity potential.
+
+    Returns
+    -------
+    A : ndarray, shape (2n, 2n)
+        Velocity covariance block (without diagonal noise).
+    """
+    n = t.shape[0]
+    E = np.exp(-lambd * d2)
+    if nondivergent:
+        R = E + bmo
+        S = E * (1 - 2 * lambd * d2) + bmo
+    else:
+        R = E * (1 - 2 * lambd * d2) + bmo
+        S = E + bmo
+
+    A = np.zeros((2 * n, 2 * n))
+    A[0:n, 0:n] = (np.cos(t) ** 2) * (R - S) + S
+    A[0:n, n : 2 * n] = np.cos(t) * np.sin(t) * (R - S)
+    A[n : 2 * n, 0:n] = A[0:n, n : 2 * n]
+    A[n : 2 * n, n : 2 * n] = (np.sin(t) ** 2) * (R - S) + S
+    return A
+
+
+def scalar(xc, yc, x, y, t=None, corrlenx=None, corrleny=None, err=None):
     """
     Scalar objective analysis via Gauss-Markov estimation.
 
@@ -62,24 +122,10 @@ def scaloa(xc, yc, x, y, t=None, corrlenx=None, corrleny=None, err=None):
     y = np.asarray(y)
 
     n = len(x)
-    x = x.reshape(1, n)
-    y = y.reshape(1, n)
-
-    # Squared distance matrix between observations
-    d2 = (
-        (np.tile(x, (n, 1)).T - np.tile(x, (n, 1))) ** 2
-        + (np.tile(y, (n, 1)).T - np.tile(y, (n, 1))) ** 2
-    )
-
     nv = len(xc)
-    xc = xc.reshape(1, nv)
-    yc = yc.reshape(1, nv)
 
-    # Squared distance between observations and target points
-    dc2 = (
-        (np.tile(xc, (n, 1)).T - np.tile(x, (nv, 1))) ** 2
-        + (np.tile(yc, (n, 1)).T - np.tile(y, (nv, 1))) ** 2
-    )
+    _, _, d2 = _pairwise(x, y, x, y)
+    _, _, dc2 = _pairwise(xc, yc, x, y)
 
     # Correlation matrix (A) and cross-correlation (C)
     A = (1 - err) * np.exp(-d2 / corrlen**2)
@@ -99,14 +145,15 @@ def scaloa(xc, yc, x, y, t=None, corrlenx=None, corrleny=None, err=None):
     return ep
 
 
-def vectoa(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
+def streamfunction(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
     """
-    Vectorial objective analysis for velocity fields.
+    Recover the streamfunction from scattered velocity observations.
 
     Interpolates scattered velocity observations (u, v) onto a grid
     (xc, yc), returning the streamfunction field. The method assumes a
     Gaussian streamfunction covariance and derives the velocity-velocity
-    and streamfunction-velocity cross-covariance matrices analytically.
+    and streamfunction-velocity cross-covariance matrices analytically,
+    under the assumption of purely nondivergent flow.
 
     Parameters
     ----------
@@ -170,50 +217,24 @@ def vectoa(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
     x = x * (corrleny / corrlenx)
 
     n = len(x)
-
-    # Stack velocity observations into a single column vector [u; v]
     uv = np.hstack((u, v)).reshape(-1, 1)
 
-    # Angles and distances between all observation pairs
-    dy_pairs = -np.tile(y, (n, 1)).T + np.tile(y, (n, 1))
-    dx_pairs = -np.tile(x, (n, 1)).T + np.tile(x, (n, 1))
-    t = np.arctan2(dy_pairs, dx_pairs)
-
-    d2 = (
-        (np.tile(x, (n, 1)).T - np.tile(x, (n, 1))) ** 2
-        + (np.tile(y, (n, 1)).T - np.tile(y, (n, 1))) ** 2
-    )
-
-    lambd = 1 / (corrlen**2)
+    # Observation-observation covariance
+    dx, dy, d2 = _pairwise(x, y, x, y)
+    t = np.arctan2(dy, dx)
+    lambd = 1 / corrlen**2
     bmo = b * err / lambd
+    A = _velocity_cov_block(t, d2, lambd, bmo) + err * np.eye(2 * n)
 
-    # Longitudinal and transverse covariance
-    R = np.exp(-lambd * d2) + bmo
-    S = np.exp(-lambd * d2) * (1 - 2 * lambd * d2) + bmo
-
-    # Velocity-velocity covariance matrix (2n x 2n)
-    A = np.zeros((2 * n, 2 * n))
-    A[0:n, 0:n] = (np.cos(t) ** 2) * (R - S) + S
-    A[0:n, n : 2 * n] = np.cos(t) * np.sin(t) * (R - S)
-    A[n : 2 * n, 0:n] = A[0:n, n : 2 * n]
-    A[n : 2 * n, n : 2 * n] = (np.sin(t) ** 2) * (R - S) + S
-    A = A + err * np.eye(2 * n)
-
-    # Target grid dimensions
+    # Target grid
     nv1, nv2 = xc.shape
     nv = nv1 * nv2
     xc_flat = xc.T.ravel()
     yc_flat = yc.T.ravel()
 
-    # Angles and distances from target points to observation points
-    dy_cross = -np.tile(yc_flat, (n, 1)).T + np.tile(y, (nv, 1))
-    dx_cross = -np.tile(xc_flat, (n, 1)).T + np.tile(x, (nv, 1))
-    tc = np.arctan2(dy_cross, dx_cross)
-
-    dc2 = (
-        (np.tile(xc_flat, (n, 1)).T - np.tile(x, (nv, 1))) ** 2
-        + (np.tile(yc_flat, (n, 1)).T - np.tile(y, (nv, 1))) ** 2
-    )
+    # Target-observation cross-covariance
+    dx_c, dy_c, dc2 = _pairwise(xc_flat, yc_flat, x, y)
+    tc = np.arctan2(dy_c, dx_c)
     Rc = np.exp(-lambd * dc2) + bmo
 
     # Streamfunction-velocity cross-covariance (nv x 2n)
@@ -221,8 +242,239 @@ def vectoa(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
     P[:, 0:n] = np.sin(tc) * np.sqrt(dc2) * Rc
     P[:, n : 2 * n] = -np.cos(tc) * np.sqrt(dc2) * Rc
 
-    # Solve for streamfunction
     PSI = np.dot(P, np.linalg.solve(A, uv))
-    PSI = PSI.reshape(nv2, nv1).T
+    return PSI.reshape(nv2, nv1).T
 
-    return PSI
+
+def velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
+    """
+    Recover the velocity potential from scattered velocity observations.
+
+    Interpolates scattered velocity observations (u, v) onto a grid
+    (xc, yc), returning the velocity potential field. The method assumes
+    a Gaussian velocity potential covariance and derives the covariance
+    matrices analytically, under the assumption of purely irrotational flow.
+
+    Parameters
+    ----------
+    xc : numpy.ndarray
+        2D array of x-coordinates of the target grid (shape M x N).
+    yc : numpy.ndarray
+        2D array of y-coordinates of the target grid (shape M x N).
+    x : array_like
+        x-coordinates of velocity observation points.
+    y : array_like
+        y-coordinates of velocity observation points.
+    u : array_like
+        Observed eastward (x) velocity component.
+    v : array_like
+        Observed northward (y) velocity component.
+    corrlenx : float
+        Correlation length scale in the x-direction.
+    corrleny : float
+        Correlation length scale in the y-direction.
+    err : float
+        Normalized random error variance (0 < err < 1).
+    b : float, optional
+        Mean correction parameter. Default is 0 (no correction).
+
+    Returns
+    -------
+    chi : numpy.ndarray
+        Velocity potential field on the target grid (shape M x N).
+
+    Notes
+    -----
+    The method solves for the velocity potential (chi) given velocity
+    observations by exploiting the relationship:
+
+        u = d(chi)/dx,  v = d(chi)/dy
+
+    For the irrotational case, the longitudinal and transverse covariance
+    roles swap compared to the nondivergent (streamfunction) case.
+
+    Anisotropy is handled by rescaling the x-coordinate by the ratio
+    corrleny / corrlenx.
+
+    References
+    ----------
+    Bretherton, F. P., Davis, R. E., & Fandry, C. B. (1976).
+    A technique for objective analysis and design of oceanographic
+    experiments applied to MODE-73. Deep-Sea Research, 23(7), 559-582.
+    """
+    xc = np.asarray(xc)
+    yc = np.asarray(yc)
+    x = np.asarray(x)
+    y = np.asarray(y)
+    u = np.asarray(u)
+    v = np.asarray(v)
+
+    # Rescale x-coordinates for anisotropy
+    corrlen = corrleny
+    xc = xc * (corrleny / corrlenx)
+    x = x * (corrleny / corrlenx)
+
+    n = len(x)
+    uv = np.hstack((u, v)).reshape(-1, 1)
+
+    # Observation-observation covariance (irrotational: swapped R/S)
+    dx, dy, d2 = _pairwise(x, y, x, y)
+    t = np.arctan2(dy, dx)
+    lambd = 1 / corrlen**2
+    bmo = b * err / lambd
+    A = (_velocity_cov_block(t, d2, lambd, bmo, nondivergent=False)
+         + err * np.eye(2 * n))
+
+    # Target grid
+    nv1, nv2 = xc.shape
+    nv = nv1 * nv2
+    xc_flat = xc.T.ravel()
+    yc_flat = yc.T.ravel()
+
+    # Target-observation cross-covariance
+    dx_c, dy_c, dc2 = _pairwise(xc_flat, yc_flat, x, y)
+    tc = np.arctan2(dy_c, dx_c)
+    Rc = np.exp(-lambd * dc2) + bmo
+
+    # Velocity-potential-velocity cross-covariance (nv x 2n)
+    P = np.zeros((nv, 2 * n))
+    P[:, 0:n] = -np.cos(tc) * np.sqrt(dc2) * Rc
+    P[:, n : 2 * n] = -np.sin(tc) * np.sqrt(dc2) * Rc
+
+    CHI = np.dot(P, np.linalg.solve(A, uv))
+    return CHI.reshape(nv2, nv1).T
+
+
+def helmholtz(xc, yc, x, y, u, v,
+              corrlenx_psi, corrleny_psi,
+              corrlenx_chi, corrleny_chi,
+              err, b=0):
+    """
+    Helmholtz decomposition via Bretherton optimal estimation.
+
+    Jointly recovers the streamfunction (psi) and velocity potential (chi)
+    from scattered velocity observations. Models the velocity field as:
+
+        u = -d(psi)/dy + d(chi)/dx
+        v =  d(psi)/dx + d(chi)/dy
+
+    The streamfunction and velocity potential can have independent
+    correlation length scales, allowing different spatial structures
+    for the nondivergent and irrotational components.
+
+    Parameters
+    ----------
+    xc : numpy.ndarray
+        2D array of x-coordinates of the target grid (shape M x N).
+    yc : numpy.ndarray
+        2D array of y-coordinates of the target grid (shape M x N).
+    x : array_like
+        x-coordinates of velocity observation points.
+    y : array_like
+        y-coordinates of velocity observation points.
+    u : array_like
+        Observed eastward (x) velocity component.
+    v : array_like
+        Observed northward (y) velocity component.
+    corrlenx_psi : float
+        Streamfunction correlation length in x.
+    corrleny_psi : float
+        Streamfunction correlation length in y.
+    corrlenx_chi : float
+        Velocity potential correlation length in x.
+    corrleny_chi : float
+        Velocity potential correlation length in y.
+    err : float
+        Normalized random error variance (0 < err < 1).
+    b : float, optional
+        Mean correction parameter. Default is 0 (no correction).
+
+    Returns
+    -------
+    psi : numpy.ndarray
+        Streamfunction field on the target grid (shape M x N).
+    chi : numpy.ndarray
+        Velocity potential field on the target grid (shape M x N).
+
+    Notes
+    -----
+    The velocity-velocity covariance matrix is the sum of contributions
+    from the nondivergent (psi) and irrotational (chi) parts, plus
+    measurement noise. The system is solved once, then both fields are
+    recovered via their respective cross-covariance matrices.
+
+    Anisotropy is handled independently for each field by rescaling the
+    x-coordinate by the ratio corrleny / corrlenx.
+
+    References
+    ----------
+    Bretherton, F. P., Davis, R. E., & Fandry, C. B. (1976).
+    A technique for objective analysis and design of oceanographic
+    experiments applied to MODE-73. Deep-Sea Research, 23(7), 559-582.
+    """
+    xc = np.asarray(xc)
+    yc = np.asarray(yc)
+    x = np.asarray(x)
+    y = np.asarray(y)
+    u = np.asarray(u)
+    v = np.asarray(v)
+
+    n = len(x)
+    uv = np.hstack((u, v)).reshape(-1, 1)
+
+    # Psi-space rescaling
+    corrlen_psi = corrleny_psi
+    x_psi = x * (corrleny_psi / corrlenx_psi)
+    xc_psi = xc * (corrleny_psi / corrlenx_psi)
+
+    # Chi-space rescaling
+    corrlen_chi = corrleny_chi
+    x_chi = x * (corrleny_chi / corrlenx_chi)
+    xc_chi = xc * (corrleny_chi / corrlenx_chi)
+
+    # Observation-observation covariance: A = A_psi + A_chi + err*I
+    dx_psi, dy, d2_psi = _pairwise(x_psi, y, x_psi, y)
+    t_psi = np.arctan2(dy, dx_psi)
+    lambd_psi = 1 / corrlen_psi**2
+    bmo_psi = b * err / lambd_psi
+
+    dx_chi, _, d2_chi = _pairwise(x_chi, y, x_chi, y)
+    t_chi = np.arctan2(dy, dx_chi)
+    lambd_chi = 1 / corrlen_chi**2
+    bmo_chi = b * err / lambd_chi
+
+    A = (_velocity_cov_block(t_psi, d2_psi, lambd_psi, bmo_psi, nondivergent=True)
+         + _velocity_cov_block(t_chi, d2_chi, lambd_chi, bmo_chi, nondivergent=False)
+         + err * np.eye(2 * n))
+
+    w = np.linalg.solve(A, uv)
+
+    # Target grid
+    nv1, nv2 = xc.shape
+    nv = nv1 * nv2
+    yc_flat = yc.T.ravel()
+
+    # Psi cross-covariance
+    xc_psi_flat = xc_psi.T.ravel()
+    dx_c, dy_c, dc2 = _pairwise(xc_psi_flat, yc_flat, x_psi, y)
+    tc = np.arctan2(dy_c, dx_c)
+    Rc = np.exp(-lambd_psi * dc2) + bmo_psi
+
+    P_psi = np.zeros((nv, 2 * n))
+    P_psi[:, 0:n] = np.sin(tc) * np.sqrt(dc2) * Rc
+    P_psi[:, n : 2 * n] = -np.cos(tc) * np.sqrt(dc2) * Rc
+
+    # Chi cross-covariance
+    xc_chi_flat = xc_chi.T.ravel()
+    dx_c, dy_c, dc2 = _pairwise(xc_chi_flat, yc_flat, x_chi, y)
+    tc = np.arctan2(dy_c, dx_c)
+    Rc = np.exp(-lambd_chi * dc2) + bmo_chi
+
+    P_chi = np.zeros((nv, 2 * n))
+    P_chi[:, 0:n] = -np.cos(tc) * np.sqrt(dc2) * Rc
+    P_chi[:, n : 2 * n] = -np.sin(tc) * np.sqrt(dc2) * Rc
+
+    PSI = np.dot(P_psi, w).reshape(nv2, nv1).T
+    CHI = np.dot(P_chi, w).reshape(nv2, nv1).T
+
+    return PSI, CHI
