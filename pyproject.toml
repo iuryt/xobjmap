@@ -43,7 +43,7 @@ dependencies = [
 [project.optional-dependencies]
 jax = ["jax>=0.4", "jaxopt>=0.8"]
 test = ["pytest", "pytest-cov"]
-docs = ["sphinx", "pydata-sphinx-theme"]
+docs = ["mkdocs", "mkdocs-material", "matplotlib"]
 
 [project.urls]
 Homepage = "https://github.com/iuryt/xobjmap"

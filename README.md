@@ -2,6 +2,8 @@
 
 Xarray-native objective mapping and interpolation of scattered observations.
 
+![Rankine vortex reconstruction from ADCP transects](docs/example_vortex.png)
+
 ## Overview
 
 **xobjmap** provides optimal interpolation of scattered observations onto
@@ -18,21 +20,60 @@ arbitrary target locations using Gauss-Markov estimation. It supports:
 
 ## Installation
 
+With pixi (recommended):
+```bash
+pixi add xobjmap
+```
+
+With conda:
 ```bash
 conda install -c conda-forge xobjmap
+```
+
+With pip:
+```bash
+pip install xobjmap
 ```
 
 ## Quick start
 
 ```python
 import numpy as np
-import xobjmap
+import xarray as xr
+import xobjmap  # registers the xarray accessor
 
-# Scalar objective analysis
-tp, ep = xobjmap.scaloa(xc, yc, x, y, t, corrlenx=200e3, corrleny=100e3, err=0.1)
+# Scattered observations
+obs = xr.Dataset(
+    {"temp": ("station", temp_data)},
+    coords={"lon": ("station", lons), "lat": ("station", lats)},
+)
 
-# Vectorial objective analysis (velocity → streamfunction)
-psi = xobjmap.vectoa(Xg, Yg, X, Y, U, V, corrlenx=200e3, corrleny=100e3, err=0.1)
+# Target grid
+target = xr.Dataset(
+    coords={"lon": np.linspace(-40, -38, 50), "lat": np.linspace(-24, -22, 40)}
+)
+
+# Scalar objective analysis → interpolated field + error map
+result = obs.xobjmap.scalar_interp(
+    "temp", target, corrlen={"lon": 1.0, "lat": 0.5}, err=0.1
+)
+result.temp   # interpolated field
+result.error  # normalized error map
+
+# Vectorial objective analysis → streamfunction from velocity observations
+obs_vel = xr.Dataset(
+    {"u": ("station", u_data), "v": ("station", v_data)},
+    coords={"lon": ("station", lons), "lat": ("station", lats)},
+)
+psi = obs_vel.xobjmap.vector_interp(
+    "u", "v", target, corrlen={"lon": 1.0, "lat": 0.5}, err=0.1
+)
+```
+
+The low-level functions are also available directly:
+```python
+tp, ep = xobjmap.scaloa(xc, yc, x, y, t, corrlenx=1.0, corrleny=0.5, err=0.1)
+psi = xobjmap.vectoa(xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1)
 ```
 
 ## References

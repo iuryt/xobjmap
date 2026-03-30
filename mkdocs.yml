@@ -1,0 +1,16 @@
+site_name: xobjmap
+site_description: Xarray-native objective mapping and interpolation
+repo_url: https://github.com/iuryt/xobjmap
+
+theme:
+  name: material
+  palette:
+    primary: blue
+    accent: light blue
+
+nav:
+  - Home: index.md
+
+markdown_extensions:
+  - pymdownx.highlight
+  - pymdownx.superfences

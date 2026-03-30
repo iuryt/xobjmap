@@ -47,3 +47,22 @@ def test_scaloa_error_near_observations_is_small():
     ep = scaloa(xc, yc, x, y, corrlenx=2.0, corrleny=2.0, err=0.05)
 
     assert ep[0] < 0.1
+
+
+def test_scaloa_does_not_modify_inputs():
+    """scaloa should not modify the input arrays."""
+    x = np.array([0.0, 1.0, 2.0])
+    y = np.array([0.0, 1.0, 2.0])
+    t = np.array([10.0, 20.0, 30.0])
+    xc = np.array([0.5, 1.5])
+    yc = np.array([0.5, 1.5])
+
+    x_orig = x.copy()
+    xc_orig = xc.copy()
+    t_orig = t.copy()
+
+    scaloa(xc, yc, x, y, t, corrlenx=3.0, corrleny=1.5, err=0.1)
+
+    np.testing.assert_array_equal(x, x_orig)
+    np.testing.assert_array_equal(xc, xc_orig)
+    np.testing.assert_array_equal(t, t_orig)
