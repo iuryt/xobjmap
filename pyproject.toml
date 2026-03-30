@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xobjmap"
+version = "0.0.1"
+description = "Xarray-native objective mapping and interpolation of scattered observations"
+readme = "README.md"
+license = "MIT"
+authors = [
+    {name = "Iury T. Simoes-Sousa", email = "simoesiury@gmail.com"},
+]
+requires-python = ">=3.10"
+keywords = [
+    "interpolation",
+    "objective-analysis",
+    "optimal-interpolation",
+    "xarray",
+    "oceanography",
+    "geosciences",
+    "scattered-data",
+    "gauss-markov",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.9",
+    "xarray>=2022.06",
+]
+
+[project.optional-dependencies]
+jax = ["jax>=0.4", "jaxopt>=0.8"]
+test = ["pytest", "pytest-cov"]
+docs = ["sphinx", "pydata-sphinx-theme"]
+
+[project.urls]
+Homepage = "https://github.com/iuryt/xobjmap"
+Repository = "https://github.com/iuryt/xobjmap.git"
+Issues = "https://github.com/iuryt/xobjmap/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xobjmap"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.pypi-dependencies]
+xobjmap = { path = ".", editable = true }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+docs = { features = ["docs"], solve-group = "default" }
+jax = { features = ["jax"], solve-group = "default" }
+test = { features = ["test"], solve-group = "default" }
+
+[tool.pixi.tasks]
+test = "pytest"
