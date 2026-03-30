@@ -7,10 +7,8 @@ from xobjmap import vectoa
 
 def test_vectoa_returns_correct_shape():
     """vectoa output shape should match the target grid."""
-    # Simple target grid
     gx, gy = np.meshgrid(np.linspace(0, 10, 8), np.linspace(0, 10, 6))
 
-    # Scattered velocity observations
     rng = np.random.default_rng(42)
     x = rng.uniform(1, 9, 20)
     y = rng.uniform(1, 9, 20)
@@ -30,12 +28,48 @@ def test_vectoa_does_not_modify_inputs():
     u = np.array([1.0, 0.0, -1.0])
     v = np.array([0.0, 1.0, 0.0])
 
-    gx_orig = gx.copy()
-    x_orig = x.copy()
-    u_orig = u.copy()
+    gx_orig, x_orig, u_orig = gx.copy(), x.copy(), u.copy()
 
-    vectoa(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=3.0, err=0.1)
+    vectoa(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=1.5, err=0.1)
 
     np.testing.assert_array_equal(gx, gx_orig)
     np.testing.assert_array_equal(x, x_orig)
     np.testing.assert_array_equal(u, u_orig)
+
+
+def test_vectoa_recovers_vortex():
+    """vectoa should recover a Gaussian vortex streamfunction."""
+    # Gaussian vortex: psi = exp(-r^2/2L^2)
+    # u = -dpsi/dy = (y/L^2) * psi
+    # v =  dpsi/dx = -(x/L^2) * psi
+    L = 3.0
+    rng = np.random.default_rng(42)
+    x_obs = rng.uniform(-8, 8, 60)
+    y_obs = rng.uniform(-8, 8, 60)
+    r2 = x_obs**2 + y_obs**2
+    psi_obs = np.exp(-r2 / (2 * L**2))
+    u_obs = (y_obs / L**2) * psi_obs
+    v_obs = -(x_obs / L**2) * psi_obs
+
+    gx, gy = np.meshgrid(np.linspace(-6, 6, 20), np.linspace(-6, 6, 20))
+
+    psi_recon = vectoa(gx, gy, x_obs, y_obs, u_obs, v_obs,
+                       corrlenx=4.0, corrleny=4.0, err=0.01)
+
+    # Compare structure: correlation between reconstructed and true
+    r2_grid = gx**2 + gy**2
+    psi_true = np.exp(-r2_grid / (2 * L**2))
+
+    # Remove means (absolute value is arbitrary) and normalize
+    psi_recon = psi_recon - psi_recon.mean()
+    psi_true = psi_true - psi_true.mean()
+    psi_recon = psi_recon / np.abs(psi_recon).max()
+    psi_true = psi_true / np.abs(psi_true).max()
+
+    # Correlation must be positive (correct sign) and high (correct structure)
+    corr = np.corrcoef(psi_recon.ravel(), psi_true.ravel())[0, 1]
+    assert corr > 0.9
+
+    # RMSE should be small — catches amplitude errors
+    rmse = np.sqrt(np.mean((psi_recon - psi_true) ** 2))
+    assert rmse < 0.3
