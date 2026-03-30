@@ -11,10 +11,12 @@ arbitrary target locations using Gauss-Markov estimation. It supports:
 
 - **Scalar objective analysis** — interpolate scalar fields (temperature,
   salinity, SSH, etc.) from scattered observations with analytical error maps
-- **Vectorial objective analysis** — recover the streamfunction from scattered
+- **Streamfunction recovery** — recover the streamfunction from scattered
   velocity observations using physically derived cross-covariance
-- **Helmholtz decomposition** *(planned)* — simultaneously estimate
-  streamfunction and velocity potential from velocity observations
+- **Velocity potential recovery** — recover the velocity potential from
+  scattered velocity observations assuming irrotational flow
+- **Helmholtz decomposition** — simultaneously estimate streamfunction and
+  velocity potential from velocity observations
 - **Scalable JAX backend** *(planned)* — variational solver for large
   datasets with GPU acceleration
 
@@ -54,26 +56,40 @@ target = xr.Dataset(
 )
 
 # Scalar objective analysis → interpolated field + error map
-result = obs.xobjmap.scalar_interp(
+result = obs.xobjmap.scalar(
     "temp", target, corrlen={"lon": 1.0, "lat": 0.5}, err=0.1
 )
 result.temp   # interpolated field
 result.error  # normalized error map
 
-# Vectorial objective analysis → streamfunction from velocity observations
+# Streamfunction recovery from velocity observations
 obs_vel = xr.Dataset(
     {"u": ("station", u_data), "v": ("station", v_data)},
     coords={"lon": ("station", lons), "lat": ("station", lats)},
 )
-psi = obs_vel.xobjmap.vector_interp(
+psi = obs_vel.xobjmap.streamfunction(
     "u", "v", target, corrlen={"lon": 1.0, "lat": 0.5}, err=0.1
 )
+
+# Helmholtz decomposition → streamfunction + velocity potential
+result = obs_vel.xobjmap.helmholtz(
+    "u", "v", target,
+    corrlen_psi={"lon": 1.0, "lat": 0.5},
+    corrlen_chi={"lon": 1.0, "lat": 0.5},
+    err=0.1,
+)
+result.psi  # streamfunction
+result.chi  # velocity potential
 ```
 
 The low-level functions are also available directly:
 ```python
-tp, ep = xobjmap.scaloa(xc, yc, x, y, t, corrlenx=1.0, corrleny=0.5, err=0.1)
-psi = xobjmap.vectoa(xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1)
+tp, ep = xobjmap.scalar(xc, yc, x, y, t, corrlenx=1.0, corrleny=0.5, err=0.1)
+psi = xobjmap.streamfunction(xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1)
+chi = xobjmap.velocity_potential(xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1)
+psi, chi = xobjmap.helmholtz(xc, yc, x, y, u, v,
+    corrlenx_psi=1.0, corrleny_psi=0.5,
+    corrlenx_chi=1.0, corrleny_chi=0.5, err=0.1)
 ```
 
 ## References

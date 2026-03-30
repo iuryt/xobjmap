@@ -61,13 +61,13 @@ target = xr.Dataset(
     coords={"x": np.linspace(-300, 300, 30), "y": np.linspace(-300, 300, 30)}
 )
 
-result = obs.xobjmap.vector_interp(
+result = obs.xobjmap.streamfunction(
     "u", "v", target, corrlen={"x": 100, "y": 100}, err=0.02
 )
 
 result_spd = obs.assign(
     speed=np.sqrt(obs.u**2 + obs.v**2)
-).xobjmap.scalar_interp("speed", target, corrlen={"x": 100, "y": 100}, err=0.05)
+).xobjmap.scalar("speed", target, corrlen={"x": 100, "y": 100}, err=0.05)
 
 # %% Build analytical solution as xarray for comparison
 xg, yg = np.meshgrid(target.x.values, target.y.values)

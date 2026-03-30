@@ -8,7 +8,10 @@ on xarray Datasets containing scattered observations.
 import numpy as np
 import xarray as xr
 
-from .interp import scaloa, vectoa
+from .interp import scalar as _scalar
+from .interp import streamfunction as _streamfunction
+from .interp import velocity_potential as _velocity_potential
+from .interp import helmholtz as _helmholtz
 
 
 def _parse_corrlen(corrlen, coord_names):
@@ -66,6 +69,24 @@ def _find_coord_names(ds, target):
     return (shared[0], shared[1])
 
 
+def _extract_grid(target, cx, cy):
+    """Extract target grid arrays and build output metadata."""
+    x_target = target[cx].values
+    y_target = target[cy].values
+
+    if target[cx].ndim == 1 and target[cy].ndim == 1:
+        Xg, Yg = np.meshgrid(x_target, y_target)
+        dims = (cy, cx)
+        coords = {cx: x_target, cy: y_target}
+    else:
+        Xg = x_target
+        Yg = y_target
+        dims = target[cx].dims
+        coords = {k: v for k, v in target.coords.items()}
+
+    return Xg, Yg, dims, coords
+
+
 @xr.register_dataset_accessor("xobjmap")
 class XobjmapAccessor:
     """
@@ -90,7 +111,7 @@ class XobjmapAccessor:
     ...         "lat": np.linspace(-24, -22, 15),
     ...     }
     ... )
-    >>> result = obs.xobjmap.scalar_interp(
+    >>> result = obs.xobjmap.scalar(
     ...     "temp", target, corrlen={"lon": 1.0, "lat": 1.0}, err=0.1,
     ... )
     """
@@ -98,7 +119,7 @@ class XobjmapAccessor:
     def __init__(self, ds):
         self._ds = ds
 
-    def scalar_interp(self, var, target, corrlen, err):
+    def scalar(self, var, target, corrlen, err):
         """
         Scalar objective analysis of a variable onto target locations.
 
@@ -137,51 +158,28 @@ class XobjmapAccessor:
         corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
         cx, cy = coord_names
 
-        # Observation coordinates and values
         x_obs = ds[cx].values
         y_obs = ds[cy].values
         t_obs = ds[var].values
 
-        # Target coordinates
-        x_target = target[cx].values
-        y_target = target[cy].values
+        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
 
-        # Build target meshgrid if target has separate 1D coordinates
-        if target[cx].ndim == 1 and target[cy].ndim == 1:
-            xg, yg = np.meshgrid(x_target, y_target)
-            xc_flat = xg.ravel()
-            yc_flat = yg.ravel()
-        else:
-            xc_flat = x_target.ravel()
-            yc_flat = y_target.ravel()
-
-        tp, ep = scaloa(
-            xc_flat, yc_flat, x_obs, y_obs, t_obs,
+        tp, ep = _scalar(
+            Xg.ravel(), Yg.ravel(), x_obs, y_obs, t_obs,
             corrlenx=corrlenx, corrleny=corrleny, err=err,
         )
 
-        # Reshape onto target grid
-        if target[cx].ndim == 1 and target[cy].ndim == 1:
-            shape = (len(y_target), len(x_target))
-            tp = tp.reshape(shape)
-            ep = ep.reshape(shape)
-            dims = (cy, cx)
-            coords = {cx: x_target, cy: y_target}
-        else:
-            tp = tp.reshape(x_target.shape)
-            ep = ep.reshape(x_target.shape)
-            dims = target[cx].dims
-            coords = {k: v for k, v in target.coords.items()}
+        tp = tp.reshape(Xg.shape)
+        ep = ep.reshape(Xg.shape)
 
         return xr.Dataset(
             {var: (dims, tp), "error": (dims, ep)},
             coords=coords,
         )
 
-    def vector_interp(self, u_var, v_var, target, corrlen, err, b=0):
+    def streamfunction(self, u_var, v_var, target, corrlen, err, b=0):
         """
-        Vectorial objective analysis: recover streamfunction from
-        scattered velocity observations.
+        Recover the streamfunction from scattered velocity observations.
 
         Parameters
         ----------
@@ -217,35 +215,135 @@ class XobjmapAccessor:
         corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
         cx, cy = coord_names
 
-        # Observation coordinates and velocities
         x_obs = ds[cx].values
         y_obs = ds[cy].values
         u_obs = ds[u_var].values
         v_obs = ds[v_var].values
 
-        # Target grid
-        x_target = target[cx].values
-        y_target = target[cy].values
+        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
 
-        if target[cx].ndim == 1 and target[cy].ndim == 1:
-            Xg, Yg = np.meshgrid(x_target, y_target)
-        else:
-            Xg = x_target
-            Yg = y_target
-
-        psi = vectoa(
+        psi = _streamfunction(
             Xg, Yg, x_obs, y_obs, u_obs, v_obs,
             corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
         )
 
-        if target[cx].ndim == 1 and target[cy].ndim == 1:
-            dims = (cy, cx)
-            coords = {cx: x_target, cy: y_target}
-        else:
-            dims = target[cx].dims
-            coords = {k: v for k, v in target.coords.items()}
-
         return xr.Dataset(
             {"psi": (dims, psi)},
+            coords=coords,
+        )
+
+    def velocity_potential(self, u_var, v_var, target, corrlen, err, b=0):
+        """
+        Recover the velocity potential from scattered velocity observations.
+
+        Parameters
+        ----------
+        u_var : str
+            Name of the eastward velocity variable.
+        v_var : str
+            Name of the northward velocity variable.
+        target : xr.Dataset
+            Target grid with coordinates as dimensions.
+        corrlen : dict or float
+            Correlation length scales. Must be in the same units as
+            the coordinates.
+        err : float
+            Normalized random error variance (0 < err < 1).
+        b : float, optional
+            Mean correction parameter. Default is 0.
+
+        Returns
+        -------
+        xr.Dataset
+            Dataset on the target grid with variable ``chi``
+            (velocity potential).
+
+        Notes
+        -----
+        The correlation lengths must be in the same units as the
+        coordinates. If working with geographic coordinates (lon/lat
+        in degrees), convert to a projected coordinate system first,
+        or express corrlen in degrees.
+        """
+        ds = self._ds
+        coord_names = _find_coord_names(ds, target)
+        corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
+        cx, cy = coord_names
+
+        x_obs = ds[cx].values
+        y_obs = ds[cy].values
+        u_obs = ds[u_var].values
+        v_obs = ds[v_var].values
+
+        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
+
+        chi = _velocity_potential(
+            Xg, Yg, x_obs, y_obs, u_obs, v_obs,
+            corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
+        )
+
+        return xr.Dataset(
+            {"chi": (dims, chi)},
+            coords=coords,
+        )
+
+    def helmholtz(self, u_var, v_var, target, corrlen_psi, corrlen_chi,
+                  err, b=0):
+        """
+        Helmholtz decomposition: recover streamfunction and velocity
+        potential from scattered velocity observations.
+
+        Parameters
+        ----------
+        u_var : str
+            Name of the eastward velocity variable.
+        v_var : str
+            Name of the northward velocity variable.
+        target : xr.Dataset
+            Target grid with coordinates as dimensions.
+        corrlen_psi : dict or float
+            Correlation length scales for the streamfunction.
+        corrlen_chi : dict or float
+            Correlation length scales for the velocity potential.
+        err : float
+            Normalized random error variance (0 < err < 1).
+        b : float, optional
+            Mean correction parameter. Default is 0.
+
+        Returns
+        -------
+        xr.Dataset
+            Dataset on the target grid with variables ``psi``
+            (streamfunction) and ``chi`` (velocity potential).
+
+        Notes
+        -----
+        The correlation lengths must be in the same units as the
+        coordinates. If working with geographic coordinates (lon/lat
+        in degrees), convert to a projected coordinate system first,
+        or express corrlen in degrees.
+        """
+        ds = self._ds
+        coord_names = _find_coord_names(ds, target)
+        corrlenx_psi, corrleny_psi = _parse_corrlen(corrlen_psi, coord_names)
+        corrlenx_chi, corrleny_chi = _parse_corrlen(corrlen_chi, coord_names)
+        cx, cy = coord_names
+
+        x_obs = ds[cx].values
+        y_obs = ds[cy].values
+        u_obs = ds[u_var].values
+        v_obs = ds[v_var].values
+
+        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
+
+        psi, chi = _helmholtz(
+            Xg, Yg, x_obs, y_obs, u_obs, v_obs,
+            corrlenx_psi=corrlenx_psi, corrleny_psi=corrleny_psi,
+            corrlenx_chi=corrlenx_chi, corrleny_chi=corrleny_chi,
+            err=err, b=b,
+        )
+
+        return xr.Dataset(
+            {"psi": (dims, psi), "chi": (dims, chi)},
             coords=coords,
         )
