@@ -5,7 +5,7 @@ import numpy as np
 from xobjmap import streamfunction
 
 
-def test_streamfunction_returns_correct_shape():
+def test_streamfunction_returns_correct_shape(backend):
     """streamfunction output shape should match the target grid."""
     gx, gy = np.meshgrid(np.linspace(0, 10, 8), np.linspace(0, 10, 6))
 
@@ -15,12 +15,12 @@ def test_streamfunction_returns_correct_shape():
     u = rng.standard_normal(20)
     v = rng.standard_normal(20)
 
-    psi = streamfunction(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=3.0, err=0.1)
+    psi = streamfunction(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=3.0, err=0.1, backend=backend)
 
     assert psi.shape == gx.shape
 
 
-def test_streamfunction_does_not_modify_inputs():
+def test_streamfunction_does_not_modify_inputs(backend):
     """streamfunction should not modify the input arrays."""
     gx, gy = np.meshgrid(np.linspace(0, 10, 5), np.linspace(0, 10, 5))
     x = np.array([2.0, 5.0, 8.0])
@@ -30,14 +30,14 @@ def test_streamfunction_does_not_modify_inputs():
 
     gx_orig, x_orig, u_orig = gx.copy(), x.copy(), u.copy()
 
-    streamfunction(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=1.5, err=0.1)
+    streamfunction(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=1.5, err=0.1, backend=backend)
 
     np.testing.assert_array_equal(gx, gx_orig)
     np.testing.assert_array_equal(x, x_orig)
     np.testing.assert_array_equal(u, u_orig)
 
 
-def test_streamfunction_recovers_vortex():
+def test_streamfunction_recovers_vortex(backend):
     """Velocities derived from reconstructed psi should match the true field."""
     # Gaussian vortex: psi = exp(-r^2/2L^2)
     # u = -dpsi/dy = (y/L^2) * psi
@@ -54,7 +54,7 @@ def test_streamfunction_recovers_vortex():
     gx, gy = np.meshgrid(np.linspace(-6, 6, 20), np.linspace(-6, 6, 20))
 
     psi_recon = streamfunction(gx, gy, x_obs, y_obs, u_obs, v_obs,
-                               corrlenx=4.0, corrleny=4.0, err=0.01)
+                               corrlenx=4.0, corrleny=4.0, err=0.01, backend=backend)
 
     # True velocities on grid
     r2_grid = gx**2 + gy**2

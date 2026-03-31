@@ -8,6 +8,7 @@ on xarray Datasets containing scattered observations.
 import numpy as np
 import xarray as xr
 
+from .interp import error as _error
 from .interp import scalar as _scalar
 from .interp import streamfunction as _streamfunction
 from .interp import velocity_potential as _velocity_potential
@@ -119,7 +120,7 @@ class XobjmapAccessor:
     def __init__(self, ds):
         self._ds = ds
 
-    def scalar(self, var, target, corrlen, err):
+    def scalar(self, var, target, corrlen, err, backend="numpy"):
         """
         Scalar objective analysis of a variable onto target locations.
 
@@ -138,6 +139,9 @@ class XobjmapAccessor:
             the same units as the coordinates.
         err : float
             Normalized random error variance (0 < err < 1).
+        backend : {"numpy", "jax"}, optional
+            Array backend to use. Use ``"jax"`` for GPU acceleration
+            (requires JAX to be installed). Default is ``"numpy"``.
 
         Returns
         -------
@@ -164,20 +168,26 @@ class XobjmapAccessor:
 
         Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
 
-        tp, ep = _scalar(
+        tp = _scalar(
             Xg.ravel(), Yg.ravel(), x_obs, y_obs, t_obs,
             corrlenx=corrlenx, corrleny=corrleny, err=err,
+            backend=backend,
+        )
+        ep = _error(
+            Xg.ravel(), Yg.ravel(), x_obs, y_obs,
+            corrlenx=corrlenx, corrleny=corrleny, err=err,
+            backend=backend,
         )
 
-        tp = tp.reshape(Xg.shape)
-        ep = ep.reshape(Xg.shape)
+        tp = np.asarray(tp).reshape(Xg.shape)
+        ep = np.asarray(ep).reshape(Xg.shape)
 
         return xr.Dataset(
             {var: (dims, tp), "error": (dims, ep)},
             coords=coords,
         )
 
-    def streamfunction(self, u_var, v_var, target, corrlen, err, b=0):
+    def streamfunction(self, u_var, v_var, target, corrlen, err, b=0, backend="numpy"):
         """
         Recover the streamfunction from scattered velocity observations.
 
@@ -225,6 +235,7 @@ class XobjmapAccessor:
         psi = _streamfunction(
             Xg, Yg, x_obs, y_obs, u_obs, v_obs,
             corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
+            backend=backend,
         )
 
         return xr.Dataset(
@@ -232,7 +243,7 @@ class XobjmapAccessor:
             coords=coords,
         )
 
-    def velocity_potential(self, u_var, v_var, target, corrlen, err, b=0):
+    def velocity_potential(self, u_var, v_var, target, corrlen, err, b=0, backend="numpy"):
         """
         Recover the velocity potential from scattered velocity observations.
 
@@ -280,6 +291,7 @@ class XobjmapAccessor:
         chi = _velocity_potential(
             Xg, Yg, x_obs, y_obs, u_obs, v_obs,
             corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
+            backend=backend,
         )
 
         return xr.Dataset(
@@ -288,7 +300,7 @@ class XobjmapAccessor:
         )
 
     def helmholtz(self, u_var, v_var, target, corrlen_psi, corrlen_chi,
-                  err, b=0):
+                  err, b=0, backend="numpy"):
         """
         Helmholtz decomposition: recover streamfunction and velocity
         potential from scattered velocity observations.
@@ -340,7 +352,7 @@ class XobjmapAccessor:
             Xg, Yg, x_obs, y_obs, u_obs, v_obs,
             corrlenx_psi=corrlenx_psi, corrleny_psi=corrleny_psi,
             corrlenx_chi=corrlenx_chi, corrleny_chi=corrleny_chi,
-            err=err, b=b,
+            err=err, b=b, backend=backend,
         )
 
         return xr.Dataset(

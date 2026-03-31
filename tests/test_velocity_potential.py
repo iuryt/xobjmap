@@ -5,7 +5,7 @@ import numpy as np
 from xobjmap import velocity_potential
 
 
-def test_velocity_potential_returns_correct_shape():
+def test_velocity_potential_returns_correct_shape(backend):
     """velocity_potential output shape should match the target grid."""
     gx, gy = np.meshgrid(np.linspace(0, 10, 8), np.linspace(0, 10, 6))
 
@@ -15,12 +15,12 @@ def test_velocity_potential_returns_correct_shape():
     u = rng.standard_normal(20)
     v = rng.standard_normal(20)
 
-    chi = velocity_potential(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=3.0, err=0.1)
+    chi = velocity_potential(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=3.0, err=0.1, backend=backend)
 
     assert chi.shape == gx.shape
 
 
-def test_velocity_potential_does_not_modify_inputs():
+def test_velocity_potential_does_not_modify_inputs(backend):
     """velocity_potential should not modify the input arrays."""
     gx, gy = np.meshgrid(np.linspace(0, 10, 5), np.linspace(0, 10, 5))
     x = np.array([2.0, 5.0, 8.0])
@@ -30,14 +30,14 @@ def test_velocity_potential_does_not_modify_inputs():
 
     gx_orig, x_orig, u_orig = gx.copy(), x.copy(), u.copy()
 
-    velocity_potential(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=1.5, err=0.1)
+    velocity_potential(gx, gy, x, y, u, v, corrlenx=3.0, corrleny=1.5, err=0.1, backend=backend)
 
     np.testing.assert_array_equal(gx, gx_orig)
     np.testing.assert_array_equal(x, x_orig)
     np.testing.assert_array_equal(u, u_orig)
 
 
-def test_velocity_potential_recovers_source():
+def test_velocity_potential_recovers_source(backend):
     """Velocities derived from reconstructed chi should match the true field."""
     # Gaussian source: chi = exp(-r^2/2L^2)
     # u = dchi/dx = -(x/L^2) * chi
@@ -54,7 +54,7 @@ def test_velocity_potential_recovers_source():
     gx, gy = np.meshgrid(np.linspace(-6, 6, 20), np.linspace(-6, 6, 20))
 
     chi_recon = velocity_potential(gx, gy, x_obs, y_obs, u_obs, v_obs,
-                                   corrlenx=4.0, corrleny=4.0, err=0.01)
+                                   corrlenx=4.0, corrleny=4.0, err=0.01, backend=backend)
 
     # True velocities on grid
     r2_grid = gx**2 + gy**2

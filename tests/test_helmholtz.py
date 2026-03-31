@@ -5,7 +5,7 @@ import numpy as np
 from xobjmap import helmholtz
 
 
-def test_helmholtz_returns_correct_shapes():
+def test_helmholtz_returns_correct_shapes(backend):
     """helmholtz should return psi and chi matching the target grid shape."""
     gx, gy = np.meshgrid(np.linspace(0, 10, 8), np.linspace(0, 10, 6))
 
@@ -19,14 +19,14 @@ def test_helmholtz_returns_correct_shapes():
         gx, gy, x, y, u, v,
         corrlenx_psi=3.0, corrleny_psi=3.0,
         corrlenx_chi=3.0, corrleny_chi=3.0,
-        err=0.1,
+        err=0.1, backend=backend,
     )
 
     assert psi.shape == gx.shape
     assert chi.shape == gx.shape
 
 
-def test_helmholtz_does_not_modify_inputs():
+def test_helmholtz_does_not_modify_inputs(backend):
     """helmholtz should not modify the input arrays."""
     gx, gy = np.meshgrid(np.linspace(0, 10, 5), np.linspace(0, 10, 5))
     x = np.array([2.0, 5.0, 8.0])
@@ -40,7 +40,7 @@ def test_helmholtz_does_not_modify_inputs():
         gx, gy, x, y, u, v,
         corrlenx_psi=3.0, corrleny_psi=1.5,
         corrlenx_chi=2.0, corrleny_chi=1.0,
-        err=0.1,
+        err=0.1, backend=backend,
     )
 
     np.testing.assert_array_equal(gx, gx_orig)
@@ -48,7 +48,7 @@ def test_helmholtz_does_not_modify_inputs():
     np.testing.assert_array_equal(u, u_orig)
 
 
-def test_helmholtz_recovers_velocities():
+def test_helmholtz_recovers_velocities(backend):
     """Total velocity from reconstructed psi + chi should match the true field."""
     # Gaussian vortex (nondivergent): psi = exp(-r^2 / 2L^2)
     #   u_psi = -dpsi/dy = (y/L^2) * psi
@@ -75,7 +75,7 @@ def test_helmholtz_recovers_velocities():
         gx, gy, x_obs, y_obs, u_obs, v_obs,
         corrlenx_psi=4.0, corrleny_psi=4.0,
         corrlenx_chi=4.0, corrleny_chi=4.0,
-        err=0.01,
+        err=0.01, backend=backend,
     )
 
     # True velocities on grid

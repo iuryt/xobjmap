@@ -6,7 +6,7 @@ import xarray as xr
 import xobjmap
 
 
-def test_scalar_returns_dataset():
+def test_scalar_returns_dataset(backend):
     """scalar should return an xr.Dataset with var and error."""
     rng = np.random.default_rng(42)
     obs = xr.Dataset(
@@ -23,7 +23,7 @@ def test_scalar_returns_dataset():
         }
     )
 
-    result = obs.xobjmap.scalar("temp", target, corrlen={"lon": 3.0, "lat": 3.0}, err=0.1)
+    result = obs.xobjmap.scalar("temp", target, corrlen={"lon": 3.0, "lat": 3.0}, err=0.1, backend=backend)
 
     assert isinstance(result, xr.Dataset)
     assert "temp" in result
@@ -32,7 +32,7 @@ def test_scalar_returns_dataset():
     assert result["temp"].shape == (8, 10)
 
 
-def test_scalar_isotropic_corrlen():
+def test_scalar_isotropic_corrlen(backend):
     """scalar should accept a scalar corrlen for isotropic case."""
     rng = np.random.default_rng(42)
     obs = xr.Dataset(
@@ -46,12 +46,12 @@ def test_scalar_isotropic_corrlen():
         coords={"lon": np.linspace(1, 9, 5), "lat": np.linspace(1, 9, 5)}
     )
 
-    result = obs.xobjmap.scalar("temp", target, corrlen=3.0, err=0.1)
+    result = obs.xobjmap.scalar("temp", target, corrlen=3.0, err=0.1, backend=backend)
 
     assert result["temp"].shape == (5, 5)
 
 
-def test_scalar_error_bounded():
+def test_scalar_error_bounded(backend):
     """Error values should be between 0 and 1."""
     rng = np.random.default_rng(42)
     obs = xr.Dataset(
@@ -65,13 +65,13 @@ def test_scalar_error_bounded():
         coords={"lon": np.linspace(0, 10, 10), "lat": np.linspace(0, 10, 10)}
     )
 
-    result = obs.xobjmap.scalar("temp", target, corrlen=3.0, err=0.1)
+    result = obs.xobjmap.scalar("temp", target, corrlen=3.0, err=0.1, backend=backend)
 
     assert np.all(result["error"].values >= 0)
     assert np.all(result["error"].values <= 1)
 
 
-def test_streamfunction_returns_psi():
+def test_streamfunction_returns_psi(backend):
     """streamfunction should return an xr.Dataset with psi."""
     rng = np.random.default_rng(42)
     obs = xr.Dataset(
@@ -88,7 +88,7 @@ def test_streamfunction_returns_psi():
         coords={"lon": np.linspace(2, 8, 6), "lat": np.linspace(2, 8, 5)}
     )
 
-    result = obs.xobjmap.streamfunction("u", "v", target, corrlen={"lon": 3.0, "lat": 3.0}, err=0.1)
+    result = obs.xobjmap.streamfunction("u", "v", target, corrlen={"lon": 3.0, "lat": 3.0}, err=0.1, backend=backend)
 
     assert isinstance(result, xr.Dataset)
     assert "psi" in result
@@ -96,7 +96,7 @@ def test_streamfunction_returns_psi():
     assert result["psi"].shape == (5, 6)
 
 
-def test_velocity_potential_returns_chi():
+def test_velocity_potential_returns_chi(backend):
     """velocity_potential should return an xr.Dataset with chi."""
     rng = np.random.default_rng(42)
     obs = xr.Dataset(
@@ -113,7 +113,7 @@ def test_velocity_potential_returns_chi():
         coords={"lon": np.linspace(2, 8, 6), "lat": np.linspace(2, 8, 5)}
     )
 
-    result = obs.xobjmap.velocity_potential("u", "v", target, corrlen={"lon": 3.0, "lat": 3.0}, err=0.1)
+    result = obs.xobjmap.velocity_potential("u", "v", target, corrlen={"lon": 3.0, "lat": 3.0}, err=0.1, backend=backend)
 
     assert isinstance(result, xr.Dataset)
     assert "chi" in result
@@ -121,7 +121,7 @@ def test_velocity_potential_returns_chi():
     assert result["chi"].shape == (5, 6)
 
 
-def test_helmholtz_returns_psi_and_chi():
+def test_helmholtz_returns_psi_and_chi(backend):
     """helmholtz should return an xr.Dataset with psi and chi."""
     rng = np.random.default_rng(42)
     obs = xr.Dataset(
@@ -142,7 +142,7 @@ def test_helmholtz_returns_psi_and_chi():
         "u", "v", target,
         corrlen_psi={"lon": 3.0, "lat": 3.0},
         corrlen_chi={"lon": 3.0, "lat": 3.0},
-        err=0.1,
+        err=0.1, backend=backend,
     )
 
     assert isinstance(result, xr.Dataset)

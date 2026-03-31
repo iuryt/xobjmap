@@ -41,7 +41,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-jax = ["jax>=0.4", "jaxopt>=0.8"]
+jax = ["jax>=0.4"]
+jax-cuda = ["jax[cuda12]>=0.4"]
 test = ["pytest", "pytest-cov"]
 docs = ["mkdocs", "mkdocs-material", "matplotlib"]
 
@@ -62,9 +63,10 @@ xobjmap = { path = ".", editable = true }
 
 [tool.pixi.environments]
 default = { solve-group = "default" }
-docs = { features = ["docs"], solve-group = "default" }
-jax = { features = ["jax"], solve-group = "default" }
 test = { features = ["test"], solve-group = "default" }
+test-jax = { features = ["test", "jax"], solve-group = "jax" }
+test-jax-cuda = { features = ["test", "jax-cuda"], solve-group = "jax-cuda" }
+docs = { features = ["docs"], solve-group = "default" }
 
 [tool.pixi.tasks]
 test = "pytest"

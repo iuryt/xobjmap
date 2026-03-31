@@ -9,10 +9,11 @@ decomposition.
 
 __version__ = "0.0.1"
 
-from .interp import scalar, streamfunction, velocity_potential, helmholtz
+from .interp import error, scalar, streamfunction, velocity_potential, helmholtz
 from .accessor import XobjmapAccessor
 
 __all__ = [
+    "error",
     "scalar",
     "streamfunction",
     "velocity_potential",

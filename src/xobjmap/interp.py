@@ -23,6 +23,405 @@ def _pairwise(x1, y1, x2, y2):
     return dx, dy, dx**2 + dy**2
 
 
+def _scalar_numpy(xc, yc, x, y, t, corrlenx, corrleny, err):
+    """Scalar interpolation via direct solve (numpy)."""
+    corrlen = corrleny
+    xc = np.asarray(xc) * (corrleny / corrlenx)
+    x = np.asarray(x) * (corrleny / corrlenx)
+    yc = np.asarray(yc)
+    y = np.asarray(y)
+
+    n = len(x)
+
+    _, _, d2 = _pairwise(x, y, x, y)
+    _, _, dc2 = _pairwise(xc, yc, x, y)
+
+    A = (1 - err) * np.exp(-d2 / corrlen**2) + err * np.eye(n)
+    C = (1 - err) * np.exp(-dc2 / corrlen**2)
+
+    t = np.asarray(t).reshape(n, 1)
+    tp = np.dot(C, np.linalg.solve(A, t))
+    return tp
+
+
+def _scalar_jax(xc, yc, x, y, t, corrlenx, corrleny, err):
+    """Scalar interpolation via matrix-free CG on GPU (JAX)."""
+    import jax
+    import jax.numpy as jnp
+    from jax.scipy.sparse.linalg import cg
+
+    corrlen = float(corrleny)
+    ratio = corrleny / corrlenx
+    x = jnp.asarray(x, dtype=jnp.float32) * ratio
+    xc = jnp.asarray(xc, dtype=jnp.float32) * ratio
+    y = jnp.asarray(y, dtype=jnp.float32)
+    yc = jnp.asarray(yc, dtype=jnp.float32)
+
+    n = x.shape[0]
+    inv_l2 = 1.0 / (corrlen ** 2)
+    one_m_err = 1.0 - err
+    maxiter = min(n, 200)
+
+    x_obs, y_obs = x, y
+
+    # ── Chunked matvec for CG ────────────────────────────────
+    if n <= 512:
+        chunk = n
+    else:
+        chunk = 512
+        rem = n % chunk
+        if rem:
+            pad = chunk - rem
+            x = jnp.concatenate([x, jnp.zeros(pad)])
+            y = jnp.concatenate([y, jnp.zeros(pad)])
+    n_padded = x.shape[0]
+    n_chunks = n_padded // chunk
+
+    def _matvec_body(i, carry):
+        v, result = carry
+        i0 = i * chunk
+        xi = jax.lax.dynamic_slice(x, (i0,), (chunk,))
+        yi = jax.lax.dynamic_slice(y, (i0,), (chunk,))
+        d2 = (xi[:, None] - x_obs[None, :]) ** 2 + (yi[:, None] - y_obs[None, :]) ** 2
+        Kv = one_m_err * (jnp.exp(-d2 * inv_l2) @ v)
+        prev = jax.lax.dynamic_slice(result, (i0,), (chunk,))
+        result = jax.lax.dynamic_update_slice(result, prev + Kv, (i0,))
+        return v, result
+
+    @jax.jit
+    def matvec(v):
+        result = jnp.zeros(n_padded)
+        result = result.at[:n].set(err * v)
+        _, result = jax.lax.fori_loop(0, n_chunks, _matvec_body, (v, result))
+        return result[:n]
+
+    # ── Cross-covariance kernel sum ───────────────────────────
+    @jax.jit
+    def _cross_cov_vec(s):
+        def _one(args):
+            xc_j, yc_j = args
+            dc2 = (xc_j - x_obs) ** 2 + (yc_j - y_obs) ** 2
+            return one_m_err * jnp.dot(jnp.exp(-dc2 * inv_l2), s)
+        return jax.lax.map(_one, (xc, yc))
+
+    t_vec = jnp.asarray(t, dtype=jnp.float32).ravel()
+    w, _ = cg(matvec, t_vec, maxiter=maxiter)
+    tp = _cross_cov_vec(w).reshape(-1, 1)
+    return tp
+
+
+def _error_numpy(xc, yc, x, y, corrlenx, corrleny, err):
+    """Error field via direct solve (numpy)."""
+    corrlen = corrleny
+    xc = np.asarray(xc) * (corrleny / corrlenx)
+    x = np.asarray(x) * (corrleny / corrlenx)
+    yc = np.asarray(yc)
+    y = np.asarray(y)
+
+    n = len(x)
+
+    _, _, d2 = _pairwise(x, y, x, y)
+    _, _, dc2 = _pairwise(xc, yc, x, y)
+
+    A = (1 - err) * np.exp(-d2 / corrlen**2) + err * np.eye(n)
+    C = (1 - err) * np.exp(-dc2 / corrlen**2)
+
+    return 1 - np.sum(C.T * np.linalg.solve(A, C.T), axis=0) / (1 - err)
+
+
+def _error_jax(xc, yc, x, y, corrlenx, corrleny, err, k_local=None):
+    """Error field via local neighborhood solve on GPU (JAX)."""
+    import jax
+    import jax.numpy as jnp
+
+    corrlen = float(corrleny)
+    ratio = corrleny / corrlenx
+    x = jnp.asarray(x, dtype=jnp.float32) * ratio
+    xc = jnp.asarray(xc, dtype=jnp.float32) * ratio
+    y = jnp.asarray(y, dtype=jnp.float32)
+    yc = jnp.asarray(yc, dtype=jnp.float32)
+
+    n = x.shape[0]
+    inv_l2 = 1.0 / (corrlen ** 2)
+    one_m_err = 1.0 - err
+    k = min(n, k_local if k_local is not None else min(n, 100))
+
+    @jax.jit
+    def _local_error(args):
+        xc_j, yc_j = args
+        d2_all = (xc_j - x) ** 2 + (yc_j - y) ** 2
+        _, idx = jax.lax.top_k(-d2_all, k)
+        x_k, y_k = x[idx], y[idx]
+        d2_kk = (x_k[:, None] - x_k[None, :]) ** 2 + (y_k[:, None] - y_k[None, :]) ** 2
+        A_k = one_m_err * jnp.exp(-d2_kk * inv_l2) + err * jnp.eye(k)
+        d2_ck = (xc_j - x_k) ** 2 + (yc_j - y_k) ** 2
+        c_k = one_m_err * jnp.exp(-d2_ck * inv_l2)
+        return 1.0 - jnp.dot(c_k, jnp.linalg.solve(A_k, c_k)) / one_m_err
+
+    return jax.lax.map(_local_error, (xc, yc))
+
+
+def _velocity_matvec_jax(x, y, n, err, lambd, bmo, nondivergent, chunk=512):
+    """Build a chunked 2n-length matvec for velocity-velocity covariance.
+
+    Returns a JIT-compiled function ``matvec(v)`` that computes
+    ``(A_vel + err*I) @ v`` without forming the 2n × 2n matrix,
+    where A_vel is the nondivergent or irrotational velocity covariance.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    x_obs, y_obs = x, y
+    chunk = min(n, chunk)
+
+    # Pad obs coordinates so n is a multiple of chunk.
+    if n > chunk:
+        rem = n % chunk
+        if rem:
+            pad = chunk - rem
+            x = jnp.concatenate([x, jnp.zeros(pad)])
+            y = jnp.concatenate([y, jnp.zeros(pad)])
+    n_padded = x.shape[0]
+    n_chunks = n_padded // chunk
+
+    def _body(i, carry):
+        v_u, v_v, res_u, res_v = carry
+        i0 = i * chunk
+        xi = jax.lax.dynamic_slice(x, (i0,), (chunk,))
+        yi = jax.lax.dynamic_slice(y, (i0,), (chunk,))
+        # Pairwise distances and angles: chunk rows vs all n obs
+        dxx = xi[:, None] - x_obs[None, :]
+        dyy = yi[:, None] - y_obs[None, :]
+        d2 = dxx ** 2 + dyy ** 2
+        theta = jnp.arctan2(dyy, dxx)
+        # Covariance kernels
+        E = jnp.exp(-lambd * d2)
+        if nondivergent:
+            R = E + bmo
+            S = E * (1 - 2 * lambd * d2) + bmo
+        else:
+            R = E * (1 - 2 * lambd * d2) + bmo
+            S = E + bmo
+        RmS = R - S
+        ct = jnp.cos(theta)
+        st = jnp.sin(theta)
+        # Block matvec: [A_uu A_uv; A_vu A_vv] @ [v_u; v_v]
+        A_uu = ct ** 2 * RmS + S
+        A_uv = ct * st * RmS
+        A_vv = st ** 2 * RmS + S
+        chunk_u = A_uu @ v_u + A_uv @ v_v
+        chunk_v = A_uv @ v_u + A_vv @ v_v
+        prev_u = jax.lax.dynamic_slice(res_u, (i0,), (chunk,))
+        prev_v = jax.lax.dynamic_slice(res_v, (i0,), (chunk,))
+        res_u = jax.lax.dynamic_update_slice(res_u, prev_u + chunk_u, (i0,))
+        res_v = jax.lax.dynamic_update_slice(res_v, prev_v + chunk_v, (i0,))
+        return v_u, v_v, res_u, res_v
+
+    @jax.jit
+    def matvec(v):
+        v_u, v_v = v[:n], v[n:]
+        res_u = jnp.zeros(n_padded).at[:n].set(err * v_u)
+        res_v = jnp.zeros(n_padded).at[:n].set(err * v_v)
+        _, _, res_u, res_v = jax.lax.fori_loop(
+            0, n_chunks, _body, (v_u, v_v, res_u, res_v)
+        )
+        return jnp.concatenate([res_u[:n], res_v[:n]])
+
+    return matvec
+
+
+def _streamfunction_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
+    """Streamfunction recovery via matrix-free CG on GPU (JAX)."""
+    import jax
+    import jax.numpy as jnp
+    from jax.scipy.sparse.linalg import cg
+
+    corrlen = float(corrleny)
+    ratio = corrleny / corrlenx
+    x = jnp.asarray(x, dtype=jnp.float32) * ratio
+    xc = jnp.asarray(xc, dtype=jnp.float32) * ratio
+    y = jnp.asarray(y, dtype=jnp.float32)
+    yc = jnp.asarray(yc, dtype=jnp.float32)
+
+    n = x.shape[0]
+    lambd = 1.0 / corrlen ** 2
+    bmo = b * err / lambd
+    maxiter = min(2 * n, 400)
+
+    uv = jnp.concatenate([
+        jnp.asarray(u, dtype=jnp.float32).ravel(),
+        jnp.asarray(v, dtype=jnp.float32).ravel(),
+    ])
+
+    matvec = _velocity_matvec_jax(x, y, n, err, lambd, bmo, nondivergent=True)
+    w, _ = cg(matvec, uv, maxiter=maxiter)
+
+    # Cross-covariance kernel sum: P @ w for streamfunction
+    nv1, nv2 = xc.shape
+    xc_flat = xc.T.ravel()
+    yc_flat = yc.T.ravel()
+    w_u, w_v = w[:n], w[n:]
+
+    @jax.jit
+    def _psi_vec(w_u, w_v):
+        def _one(args):
+            xc_j, yc_j = args
+            dxx = x - xc_j
+            dyy = y - yc_j
+            dc2 = dxx ** 2 + dyy ** 2
+            tc = jnp.arctan2(dyy, dxx)
+            Rc = jnp.exp(-lambd * dc2) + bmo
+            sqrt_dc2 = jnp.sqrt(dc2)
+            p_u = jnp.sin(tc) * sqrt_dc2 * Rc
+            p_v = -jnp.cos(tc) * sqrt_dc2 * Rc
+            return jnp.dot(p_u, w_u) + jnp.dot(p_v, w_v)
+        return jax.lax.map(_one, (xc_flat, yc_flat))
+
+    psi = _psi_vec(w_u, w_v)
+    return psi.reshape(nv2, nv1).T
+
+
+def _velocity_potential_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
+    """Velocity potential recovery via matrix-free CG on GPU (JAX)."""
+    import jax
+    import jax.numpy as jnp
+    from jax.scipy.sparse.linalg import cg
+
+    corrlen = float(corrleny)
+    ratio = corrleny / corrlenx
+    x = jnp.asarray(x, dtype=jnp.float32) * ratio
+    xc = jnp.asarray(xc, dtype=jnp.float32) * ratio
+    y = jnp.asarray(y, dtype=jnp.float32)
+    yc = jnp.asarray(yc, dtype=jnp.float32)
+
+    n = x.shape[0]
+    lambd = 1.0 / corrlen ** 2
+    bmo = b * err / lambd
+    maxiter = min(2 * n, 400)
+
+    uv = jnp.concatenate([
+        jnp.asarray(u, dtype=jnp.float32).ravel(),
+        jnp.asarray(v, dtype=jnp.float32).ravel(),
+    ])
+
+    matvec = _velocity_matvec_jax(x, y, n, err, lambd, bmo, nondivergent=False)
+    w, _ = cg(matvec, uv, maxiter=maxiter)
+
+    # Cross-covariance kernel sum: P @ w for velocity potential
+    nv1, nv2 = xc.shape
+    xc_flat = xc.T.ravel()
+    yc_flat = yc.T.ravel()
+    w_u, w_v = w[:n], w[n:]
+
+    @jax.jit
+    def _chi_vec(w_u, w_v):
+        def _one(args):
+            xc_j, yc_j = args
+            dxx = x - xc_j
+            dyy = y - yc_j
+            dc2 = dxx ** 2 + dyy ** 2
+            tc = jnp.arctan2(dyy, dxx)
+            Rc = jnp.exp(-lambd * dc2) + bmo
+            sqrt_dc2 = jnp.sqrt(dc2)
+            p_u = -jnp.cos(tc) * sqrt_dc2 * Rc
+            p_v = -jnp.sin(tc) * sqrt_dc2 * Rc
+            return jnp.dot(p_u, w_u) + jnp.dot(p_v, w_v)
+        return jax.lax.map(_one, (xc_flat, yc_flat))
+
+    chi = _chi_vec(w_u, w_v)
+    return chi.reshape(nv2, nv1).T
+
+
+def _helmholtz_jax(xc, yc, x, y, u, v,
+                   corrlenx_psi, corrleny_psi,
+                   corrlenx_chi, corrleny_chi,
+                   err, b=0):
+    """Helmholtz decomposition via matrix-free CG on GPU (JAX)."""
+    import jax
+    import jax.numpy as jnp
+    from jax.scipy.sparse.linalg import cg
+
+    y_arr = jnp.asarray(y, dtype=jnp.float32)
+    yc_arr = jnp.asarray(yc, dtype=jnp.float32)
+
+    n = len(y_arr)
+    maxiter = min(2 * n, 400)
+
+    # Psi-space rescaling
+    corrlen_psi = float(corrleny_psi)
+    ratio_psi = corrleny_psi / corrlenx_psi
+    x_psi = jnp.asarray(x, dtype=jnp.float32) * ratio_psi
+    xc_psi = jnp.asarray(xc, dtype=jnp.float32) * ratio_psi
+    lambd_psi = 1.0 / corrlen_psi ** 2
+    bmo_psi = b * err / lambd_psi
+
+    # Chi-space rescaling
+    corrlen_chi = float(corrleny_chi)
+    ratio_chi = corrleny_chi / corrlenx_chi
+    x_chi = jnp.asarray(x, dtype=jnp.float32) * ratio_chi
+    xc_chi = jnp.asarray(xc, dtype=jnp.float32) * ratio_chi
+    lambd_chi = 1.0 / corrlen_chi ** 2
+    bmo_chi = b * err / lambd_chi
+
+    uv = jnp.concatenate([
+        jnp.asarray(u, dtype=jnp.float32).ravel(),
+        jnp.asarray(v, dtype=jnp.float32).ravel(),
+    ])
+
+    # Combined matvec: (A_psi + A_chi + err*I) @ v
+    # Each sub-matvec adds its own err*I, so we subtract one copy.
+    matvec_psi = _velocity_matvec_jax(
+        x_psi, y_arr, n, err, lambd_psi, bmo_psi, nondivergent=True
+    )
+    matvec_chi = _velocity_matvec_jax(
+        x_chi, y_arr, n, err, lambd_chi, bmo_chi, nondivergent=False
+    )
+
+    @jax.jit
+    def matvec(v):
+        return matvec_psi(v) + matvec_chi(v) - err * v
+
+    w, _ = cg(matvec, uv, maxiter=maxiter)
+    w_u, w_v = w[:n], w[n:]
+
+    # Target grid
+    nv1, nv2 = xc_psi.shape
+    xc_psi_flat = xc_psi.T.ravel()
+    xc_chi_flat = xc_chi.T.ravel()
+    yc_flat = yc_arr.T.ravel()
+
+    @jax.jit
+    def _psi_chi_vec(w_u, w_v):
+        def _one_psi(args):
+            xc_j, yc_j = args
+            dxx = x_psi - xc_j
+            dyy = y_arr - yc_j
+            dc2 = dxx ** 2 + dyy ** 2
+            tc = jnp.arctan2(dyy, dxx)
+            Rc = jnp.exp(-lambd_psi * dc2) + bmo_psi
+            sqrt_dc2 = jnp.sqrt(dc2)
+            return (jnp.dot(jnp.sin(tc) * sqrt_dc2 * Rc, w_u)
+                    + jnp.dot(-jnp.cos(tc) * sqrt_dc2 * Rc, w_v))
+
+        def _one_chi(args):
+            xc_j, yc_j = args
+            dxx = x_chi - xc_j
+            dyy = y_arr - yc_j
+            dc2 = dxx ** 2 + dyy ** 2
+            tc = jnp.arctan2(dyy, dxx)
+            Rc = jnp.exp(-lambd_chi * dc2) + bmo_chi
+            sqrt_dc2 = jnp.sqrt(dc2)
+            return (jnp.dot(-jnp.cos(tc) * sqrt_dc2 * Rc, w_u)
+                    + jnp.dot(-jnp.sin(tc) * sqrt_dc2 * Rc, w_v))
+
+        psi = jax.lax.map(_one_psi, (xc_psi_flat, yc_flat))
+        chi = jax.lax.map(_one_chi, (xc_chi_flat, yc_flat))
+        return psi, chi
+
+    psi, chi = _psi_chi_vec(w_u, w_v)
+    return psi.reshape(nv2, nv1).T, chi.reshape(nv2, nv1).T
+
+
 def _velocity_cov_block(t, d2, lambd, bmo, nondivergent=True):
     """Build a 2n x 2n velocity-velocity covariance contribution.
 
@@ -65,7 +464,66 @@ def _velocity_cov_block(t, d2, lambd, bmo, nondivergent=True):
     return A
 
 
-def scalar(xc, yc, x, y, t=None, corrlenx=None, corrleny=None, err=None):
+def error(xc, yc, x, y, corrlenx=None, corrleny=None, err=None,
+         backend="numpy", k_local=None):
+    """
+    Normalized mean squared error for scalar objective analysis.
+
+    Computes the interpolation error at target locations (xc, yc) given
+    observation locations (x, y) and correlation parameters. The error
+    depends only on the geometry and correlation structure, not on the
+    observed values.
+
+    Parameters
+    ----------
+    xc : array_like
+        x-coordinates of target (interpolation) points.
+    yc : array_like
+        y-coordinates of target (interpolation) points.
+    x : array_like
+        x-coordinates of observation points.
+    y : array_like
+        y-coordinates of observation points.
+    corrlenx : float
+        Correlation length scale in the x-direction.
+    corrleny : float
+        Correlation length scale in the y-direction.
+    err : float
+        Normalized random error variance (0 < err < 1).
+    backend : {"numpy", "jax"}, optional
+        Array backend. Default ``"numpy"`` (direct solve). ``"jax"``
+        uses local neighborhood approximation (k nearest observations
+        per target point) for GPU-friendly O(n) scaling.
+    k_local : int, optional
+        Number of nearest observations for the local error solve
+        (JAX backend only). Default is min(n, 100).
+
+    Returns
+    -------
+    ep : ndarray
+        Normalized mean squared error at target locations. Taking the
+        square root gives the interpolation error as a fraction.
+
+    Notes
+    -----
+    Anisotropy is handled by rescaling the x-coordinate by the ratio
+    corrleny / corrlenx before computing distances.
+
+    References
+    ----------
+    Bretherton, F. P., Davis, R. E., & Fandry, C. B. (1976).
+    A technique for objective analysis and design of oceanographic
+    experiments applied to MODE-73. Deep-Sea Research, 23(7), 559-582.
+    """
+    if backend == "numpy":
+        return _error_numpy(xc, yc, x, y, corrlenx, corrleny, err)
+    elif backend == "jax":
+        return _error_jax(xc, yc, x, y, corrlenx, corrleny, err, k_local=k_local)
+    else:
+        raise ValueError(f"Unknown backend {backend!r}. Choose 'numpy' or 'jax'.")
+
+
+def scalar(xc, yc, x, y, t, corrlenx=None, corrleny=None, err=None, backend="numpy"):
     """
     Scalar objective analysis via Gauss-Markov estimation.
 
@@ -84,24 +542,25 @@ def scalar(xc, yc, x, y, t=None, corrlenx=None, corrleny=None, err=None):
         x-coordinates of observation points.
     y : array_like
         y-coordinates of observation points.
-    t : array_like, optional
-        Observed scalar values at (x, y). If None, only the error map
-        is returned.
+    t : array_like
+        Observed scalar values at (x, y).
     corrlenx : float
         Correlation length scale in the x-direction.
     corrleny : float
         Correlation length scale in the y-direction.
     err : float
         Normalized random error variance (0 < err < 1).
+    backend : {"numpy", "jax"}, optional
+        Array backend to use. Default is ``"numpy"`` (direct solve).
+        Use ``"jax"`` for GPU acceleration via matrix-free conjugate
+        gradient — no large covariance matrix is formed. Requires JAX;
+        install with ``pip install 'xobjmap[jax]'``.
 
     Returns
     -------
-    tp : numpy.ndarray
-        Interpolated field at target locations. Only returned if t is
-        provided.
-    ep : numpy.ndarray
-        Normalized mean squared error at target locations. Taking the
-        square root gives the interpolation error as a fraction.
+    tp : ndarray
+        Interpolated field at target locations. Array type matches
+        the backend.
 
     Notes
     -----
@@ -109,43 +568,23 @@ def scalar(xc, yc, x, y, t=None, corrlenx=None, corrleny=None, err=None):
     corrleny / corrlenx before computing distances, so that the effective
     correlation length is isotropic in the rescaled space.
 
+    Use :func:`error` to compute the interpolation error field separately.
+
     References
     ----------
     Bretherton, F. P., Davis, R. E., & Fandry, C. B. (1976).
     A technique for objective analysis and design of oceanographic
     experiments applied to MODE-73. Deep-Sea Research, 23(7), 559-582.
     """
-    corrlen = corrleny
-    xc = np.asarray(xc) * (corrleny / corrlenx)
-    x = np.asarray(x) * (corrleny / corrlenx)
-    yc = np.asarray(yc)
-    y = np.asarray(y)
-
-    n = len(x)
-    nv = len(xc)
-
-    _, _, d2 = _pairwise(x, y, x, y)
-    _, _, dc2 = _pairwise(xc, yc, x, y)
-
-    # Correlation matrix (A) and cross-correlation (C)
-    A = (1 - err) * np.exp(-d2 / corrlen**2)
-    C = (1 - err) * np.exp(-dc2 / corrlen**2)
-
-    # Add diagonal sampling error
-    A = A + err * np.eye(n)
-
-    # Normalized mean error
-    ep = 1 - np.sum(C.T * np.linalg.solve(A, C.T), axis=0) / (1 - err)
-
-    if t is not None:
-        t = np.asarray(t).reshape(n, 1)
-        tp = np.dot(C, np.linalg.solve(A, t))
-        return tp, ep
-
-    return ep
+    if backend == "numpy":
+        return _scalar_numpy(xc, yc, x, y, t, corrlenx, corrleny, err)
+    elif backend == "jax":
+        return _scalar_jax(xc, yc, x, y, t, corrlenx, corrleny, err)
+    else:
+        raise ValueError(f"Unknown backend {backend!r}. Choose 'numpy' or 'jax'.")
 
 
-def streamfunction(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
+def streamfunction(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0, backend="numpy"):
     """
     Recover the streamfunction from scattered velocity observations.
 
@@ -204,6 +643,11 @@ def streamfunction(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
     A technique for objective analysis and design of oceanographic
     experiments applied to MODE-73. Deep-Sea Research, 23(7), 559-582.
     """
+    if backend == "jax":
+        return _streamfunction_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b)
+    elif backend != "numpy":
+        raise ValueError(f"Unknown backend {backend!r}. Choose 'numpy' or 'jax'.")
+
     xc = np.asarray(xc)
     yc = np.asarray(yc)
     x = np.asarray(x)
@@ -246,7 +690,7 @@ def streamfunction(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
     return PSI.reshape(nv2, nv1).T
 
 
-def velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
+def velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0, backend="numpy"):
     """
     Recover the velocity potential from scattered velocity observations.
 
@@ -302,6 +746,11 @@ def velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
     A technique for objective analysis and design of oceanographic
     experiments applied to MODE-73. Deep-Sea Research, 23(7), 559-582.
     """
+    if backend == "jax":
+        return _velocity_potential_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b)
+    elif backend != "numpy":
+        raise ValueError(f"Unknown backend {backend!r}. Choose 'numpy' or 'jax'.")
+
     xc = np.asarray(xc)
     yc = np.asarray(yc)
     x = np.asarray(x)
@@ -348,7 +797,7 @@ def velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
 def helmholtz(xc, yc, x, y, u, v,
               corrlenx_psi, corrleny_psi,
               corrlenx_chi, corrleny_chi,
-              err, b=0):
+              err, b=0, backend="numpy"):
     """
     Helmholtz decomposition via Bretherton optimal estimation.
 
@@ -412,6 +861,13 @@ def helmholtz(xc, yc, x, y, u, v,
     A technique for objective analysis and design of oceanographic
     experiments applied to MODE-73. Deep-Sea Research, 23(7), 559-582.
     """
+    if backend == "jax":
+        return _helmholtz_jax(xc, yc, x, y, u, v,
+                              corrlenx_psi, corrleny_psi,
+                              corrlenx_chi, corrleny_chi, err, b)
+    elif backend != "numpy":
+        raise ValueError(f"Unknown backend {backend!r}. Choose 'numpy' or 'jax'.")
+
     xc = np.asarray(xc)
     yc = np.asarray(yc)
     x = np.asarray(x)

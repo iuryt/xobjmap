@@ -6,14 +6,16 @@ Xarray-native objective mapping and interpolation of scattered observations.
 
 ## Installation
 
-With pixi (recommended):
+With pip:
 ```bash
-pixi add xobjmap
+pip install xobjmap              # numpy only
+pip install 'xobjmap[jax]'      # + JAX (CPU)
+pip install 'xobjmap[jax-cuda]' # + JAX with GPU (CUDA 12)
 ```
 
-With conda:
+With pixi (recommended for development):
 ```bash
-conda install -c conda-forge xobjmap
+pixi add xobjmap
 ```
 
 ## Quick start
@@ -63,7 +65,7 @@ result = obs_vel.xobjmap.helmholtz(
 
 ### Accessor methods
 
-#### `ds.xobjmap.scalar(var, target, corrlen, err)`
+#### `ds.xobjmap.scalar(var, target, corrlen, err, backend="numpy")`
 
 Interpolates a scalar variable from scattered observations onto target locations.
 
@@ -76,7 +78,7 @@ Interpolates a scalar variable from scattered observations onto target locations
 
 Returns an `xr.Dataset` with the interpolated field and an `error` variable.
 
-#### `ds.xobjmap.streamfunction(u_var, v_var, target, corrlen, err, b=0)`
+#### `ds.xobjmap.streamfunction(u_var, v_var, target, corrlen, err, b=0, backend="numpy")`
 
 Recovers the streamfunction from scattered velocity observations, assuming purely nondivergent flow.
 
@@ -91,7 +93,7 @@ Recovers the streamfunction from scattered velocity observations, assuming purel
 
 Returns an `xr.Dataset` with a `psi` (streamfunction) variable.
 
-#### `ds.xobjmap.velocity_potential(u_var, v_var, target, corrlen, err, b=0)`
+#### `ds.xobjmap.velocity_potential(u_var, v_var, target, corrlen, err, b=0, backend="numpy")`
 
 Recovers the velocity potential from scattered velocity observations, assuming purely irrotational flow.
 
@@ -106,7 +108,7 @@ Recovers the velocity potential from scattered velocity observations, assuming p
 
 Returns an `xr.Dataset` with a `chi` (velocity potential) variable.
 
-#### `ds.xobjmap.helmholtz(u_var, v_var, target, corrlen_psi, corrlen_chi, err, b=0)`
+#### `ds.xobjmap.helmholtz(u_var, v_var, target, corrlen_psi, corrlen_chi, err, b=0, backend="numpy")`
 
 Helmholtz decomposition: jointly recovers the streamfunction and velocity potential from scattered velocity observations.
 
@@ -124,19 +126,25 @@ Returns an `xr.Dataset` with `psi` (streamfunction) and `chi` (velocity potentia
 
 ### Low-level functions
 
-#### `xobjmap.scalar(xc, yc, x, y, t, corrlenx, corrleny, err)`
+All low-level functions accept `backend="jax"` for lower memory usage and optional GPU acceleration.
 
-Scalar Gauss-Markov estimation. Returns `(tp, ep)` if `t` is provided, or just `ep` (error map) if `t` is `None`.
+#### `xobjmap.scalar(xc, yc, x, y, t, corrlenx, corrleny, err, backend="numpy")`
 
-#### `xobjmap.streamfunction(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0)`
+Scalar Gauss-Markov estimation. Returns the interpolated field `tp`.
+
+#### `xobjmap.error(xc, yc, x, y, corrlenx, corrleny, err, backend="numpy", k_local=None)`
+
+Interpolation error field. Returns normalized mean squared error `ep`. Depends only on observation geometry, not on the observed values. The JAX backend uses a local neighborhood approximation (`k_local` nearest observations per target point).
+
+#### `xobjmap.streamfunction(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0, backend="numpy")`
 
 Recovers the streamfunction on the target grid `(xc, yc)`, assuming nondivergent flow.
 
-#### `xobjmap.velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0)`
+#### `xobjmap.velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0, backend="numpy")`
 
 Recovers the velocity potential on the target grid `(xc, yc)`, assuming irrotational flow.
 
-#### `xobjmap.helmholtz(xc, yc, x, y, u, v, corrlenx_psi, corrleny_psi, corrlenx_chi, corrleny_chi, err, b=0)`
+#### `xobjmap.helmholtz(xc, yc, x, y, u, v, corrlenx_psi, corrleny_psi, corrlenx_chi, corrleny_chi, err, b=0, backend="numpy")`
 
 Helmholtz decomposition. Returns `(psi, chi)` on the target grid.
 

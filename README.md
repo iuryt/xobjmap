@@ -17,24 +17,21 @@ arbitrary target locations using Gauss-Markov estimation. It supports:
   scattered velocity observations assuming irrotational flow
 - **Helmholtz decomposition** — simultaneously estimate streamfunction and
   velocity potential from velocity observations
-- **Scalable JAX backend** *(planned)* — variational solver for large
-  datasets with GPU acceleration
+- **JAX backend** — matrix-free conjugate gradient solver that uses
+  significantly less memory, with optional GPU acceleration
 
 ## Installation
 
-With pixi (recommended):
-```bash
-pixi add xobjmap
-```
-
-With conda:
-```bash
-conda install -c conda-forge xobjmap
-```
-
 With pip:
 ```bash
-pip install xobjmap
+pip install xobjmap              # numpy only
+pip install 'xobjmap[jax]'      # + JAX (CPU)
+pip install 'xobjmap[jax-cuda]' # + JAX with GPU (CUDA 12)
+```
+
+With pixi (recommended for development):
+```bash
+pixi add xobjmap
 ```
 
 ## Quick start
@@ -84,13 +81,16 @@ result.chi  # velocity potential
 
 The low-level functions are also available directly:
 ```python
-tp, ep = xobjmap.scalar(xc, yc, x, y, t, corrlenx=1.0, corrleny=0.5, err=0.1)
+tp = xobjmap.scalar(xc, yc, x, y, t, corrlenx=1.0, corrleny=0.5, err=0.1)
+ep = xobjmap.error(xc, yc, x, y, corrlenx=1.0, corrleny=0.5, err=0.1)
 psi = xobjmap.streamfunction(xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1)
 chi = xobjmap.velocity_potential(xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1)
 psi, chi = xobjmap.helmholtz(xc, yc, x, y, u, v,
     corrlenx_psi=1.0, corrleny_psi=0.5,
     corrlenx_chi=1.0, corrleny_chi=0.5, err=0.1)
 ```
+
+All functions accept `backend="jax"` for lower memory usage and optional GPU acceleration (requires `pip install 'xobjmap[jax]'`).
 
 ## References
 
