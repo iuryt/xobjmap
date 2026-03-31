@@ -140,8 +140,9 @@ class XobjmapAccessor:
         err : float
             Normalized random error variance (0 < err < 1).
         backend : {"numpy", "jax"}, optional
-            Array backend to use. Use ``"jax"`` for GPU acceleration
-            (requires JAX to be installed). Default is ``"numpy"``.
+            Array backend to use. Use ``"jax"`` for lower memory
+            usage and optional GPU acceleration (requires JAX to be
+            installed). Default is ``"numpy"``.
 
         Returns
         -------

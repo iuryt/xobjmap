@@ -45,7 +45,7 @@ def _scalar_numpy(xc, yc, x, y, t, corrlenx, corrleny, err):
 
 
 def _scalar_jax(xc, yc, x, y, t, corrlenx, corrleny, err):
-    """Scalar interpolation via matrix-free CG on GPU (JAX)."""
+    """Scalar interpolation via matrix-free CG (JAX)."""
     import jax
     import jax.numpy as jnp
     from jax.scipy.sparse.linalg import cg
@@ -130,7 +130,7 @@ def _error_numpy(xc, yc, x, y, corrlenx, corrleny, err):
 
 
 def _error_jax(xc, yc, x, y, corrlenx, corrleny, err, k_local=None):
-    """Error field via local neighborhood solve on GPU (JAX)."""
+    """Error field via local neighborhood solve (JAX)."""
     import jax
     import jax.numpy as jnp
 
@@ -231,7 +231,7 @@ def _velocity_matvec_jax(x, y, n, err, lambd, bmo, nondivergent, chunk=512):
 
 
 def _streamfunction_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
-    """Streamfunction recovery via matrix-free CG on GPU (JAX)."""
+    """Streamfunction recovery via matrix-free CG (JAX)."""
     import jax
     import jax.numpy as jnp
     from jax.scipy.sparse.linalg import cg
@@ -282,7 +282,7 @@ def _streamfunction_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
 
 
 def _velocity_potential_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
-    """Velocity potential recovery via matrix-free CG on GPU (JAX)."""
+    """Velocity potential recovery via matrix-free CG (JAX)."""
     import jax
     import jax.numpy as jnp
     from jax.scipy.sparse.linalg import cg
@@ -336,7 +336,7 @@ def _helmholtz_jax(xc, yc, x, y, u, v,
                    corrlenx_psi, corrleny_psi,
                    corrlenx_chi, corrleny_chi,
                    err, b=0):
-    """Helmholtz decomposition via matrix-free CG on GPU (JAX)."""
+    """Helmholtz decomposition via matrix-free CG (JAX)."""
     import jax
     import jax.numpy as jnp
     from jax.scipy.sparse.linalg import cg
@@ -493,7 +493,7 @@ def error(xc, yc, x, y, corrlenx=None, corrleny=None, err=None,
     backend : {"numpy", "jax"}, optional
         Array backend. Default ``"numpy"`` (direct solve). ``"jax"``
         uses local neighborhood approximation (k nearest observations
-        per target point) for GPU-friendly O(n) scaling.
+        per target point) for O(n) scaling.
     k_local : int, optional
         Number of nearest observations for the local error solve
         (JAX backend only). Default is min(n, 100).
@@ -552,7 +552,7 @@ def scalar(xc, yc, x, y, t, corrlenx=None, corrleny=None, err=None, backend="num
         Normalized random error variance (0 < err < 1).
     backend : {"numpy", "jax"}, optional
         Array backend to use. Default is ``"numpy"`` (direct solve).
-        Use ``"jax"`` for GPU acceleration via matrix-free conjugate
+        Use ``"jax"`` for lower memory usage via matrix-free conjugate
         gradient — no large covariance matrix is formed. Requires JAX;
         install with ``pip install 'xobjmap[jax]'``.
 
