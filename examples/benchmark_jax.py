@@ -29,7 +29,7 @@ from xobjmap import error, scalar  # noqa: E402
 rng = np.random.default_rng(42)
 
 # ── Problem sizes ──────────────────────────────────────────────
-obs_sizes = [500, 1000, 5000, 10000, 100000]
+obs_sizes = [500, 1000, 5000, 10000]
 n_target = 5000
 n_repeats = 3
 
