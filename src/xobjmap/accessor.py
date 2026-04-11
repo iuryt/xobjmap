@@ -8,42 +8,37 @@ on xarray Datasets containing scattered observations.
 import numpy as np
 import xarray as xr
 
-from .interp import error as _error
-from .interp import scalar_error as _scalar_error
-from .interp import scalar as _scalar
-from .interp import streamfunction as _streamfunction
-from .interp import streamfunction_error as _streamfunction_error
-from .interp import velocity_potential as _velocity_potential
-from .interp import velocity_potential_error as _velocity_potential_error
-from .interp import helmholtz as _helmholtz
-from .interp import helmholtz_error as _helmholtz_error
+from .interp import (
+    _helmholtz_error_nd_jax,
+    _helmholtz_error_nd_numpy,
+    _helmholtz_nd_jax,
+    _helmholtz_nd_numpy,
+    _scalar_error_nd_jax,
+    _scalar_error_nd_numpy,
+    _scalar_nd_jax,
+    _scalar_nd_numpy,
+    _single_component_vector_error_nd_jax,
+    _single_component_vector_error_nd_numpy,
+    _streamfunction_nd_jax,
+    _streamfunction_nd_numpy,
+    _velocity_potential_nd_jax,
+    _velocity_potential_nd_numpy,
+)
 
 
-def _parse_corrlen(corrlen, coord_names):
-    """
-    Parse correlation length into per-coordinate values.
-
-    Parameters
-    ----------
-    corrlen : float or dict
-        If float, isotropic. If dict, keys must match coord_names.
-    coord_names : tuple of str
-        Coordinate names, e.g. ("lon", "lat").
-
-    Returns
-    -------
-    tuple of float
-        Correlation lengths in the order of coord_names.
-    """
-    if isinstance(corrlen, dict):
-        return tuple(corrlen[name] for name in coord_names)
-    return tuple(corrlen for _ in coord_names)
+_DATETIME_UNIT_TO_NS = {
+    "ns": 1,
+    "us": 1_000,
+    "ms": 1_000_000,
+    "s": 1_000_000_000,
+    "m": 60 * 1_000_000_000,
+    "h": 60 * 60 * 1_000_000_000,
+    "D": 24 * 60 * 60 * 1_000_000_000,
+}
 
 
 def _find_obs_dim(ds):
-    """
-    Identify the observation dimension (the shared dim across data vars).
-    """
+    """Identify the shared observation dimension across data variables."""
     dims = set()
     for var in ds.data_vars:
         dims.update(ds[var].dims)
@@ -55,413 +50,527 @@ def _find_obs_dim(ds):
     )
 
 
-def _find_coord_names(ds, target):
-    """
-    Find coordinate names shared between observations and target.
+def _infer_interp_dims(ds, target, interp_dims=None):
+    """Infer interpolation dimensions from shared coordinate names."""
+    if interp_dims is not None:
+        return tuple(interp_dims)
 
-    Returns (x_coord, y_coord) preserving the order from the target
-    Dataset's dimensions.
-    """
     obs_coords = set(ds.coords)
-    target_dims = list(target.dims)
-    shared = [d for d in target_dims if d in obs_coords]
-    if len(shared) < 2:
+    shared = [name for name in target.coords if name in obs_coords]
+    if not shared:
         raise ValueError(
-            f"Need at least 2 shared coordinates between observations "
-            f"and target. Found: {shared}"
+            "Need at least one shared coordinate between observations and target."
         )
-    # Return as (x_coord, y_coord): first dim in target is x, second is y
-    return (shared[0], shared[1])
+    return tuple(shared)
 
 
-def _extract_grid(target, cx, cy):
-    """Extract target grid arrays and build output metadata."""
-    x_target = target[cx].values
-    y_target = target[cy].values
+def _parse_corrlen(corrlen, interp_dims):
+    """Return per-dimension correlation lengths in interp-dim order."""
+    if isinstance(corrlen, dict):
+        missing = [dim for dim in interp_dims if dim not in corrlen]
+        if missing:
+            raise ValueError(
+                f"Missing correlation lengths for dimensions {missing}."
+            )
+        return np.asarray([corrlen[dim] for dim in interp_dims], dtype=float)
+    return np.asarray([corrlen for _ in interp_dims], dtype=float)
 
-    if target[cx].ndim == 1 and target[cy].ndim == 1:
-        Xg, Yg = np.meshgrid(x_target, y_target)
-        dims = (cy, cx)
-        coords = {cx: x_target, cy: y_target}
+
+def _validate_derivative_dims(ds, interp_dims, derivative_dims):
+    """Validate and return the two derivative dimensions for vector methods."""
+    if derivative_dims is None:
+        if len(interp_dims) < 2:
+            raise ValueError(
+                "Vector-potential methods require exactly two derivative dimensions."
+            )
+        derivative_dims = tuple(interp_dims[:2])
     else:
-        Xg = x_target
-        Yg = y_target
-        dims = target[cx].dims
-        coords = {k: v for k, v in target.coords.items()}
+        derivative_dims = tuple(derivative_dims)
 
-    return Xg, Yg, dims, coords
+    if len(derivative_dims) != 2:
+        raise ValueError(
+            f"Expected exactly two derivative dimensions, got {derivative_dims}."
+        )
+
+    missing = [dim for dim in derivative_dims if dim not in interp_dims]
+    if missing:
+        raise ValueError(
+            f"Derivative dimensions {missing} must be included in interp_dims."
+        )
+
+    for dim in derivative_dims:
+        dtype = ds[dim].dtype
+        if np.issubdtype(dtype, np.datetime64):
+            raise ValueError(
+                f"Derivative dimension {dim!r} cannot be datetime-like."
+            )
+
+    return derivative_dims
+
+
+def _datetime_unit_factor(unit, dim):
+    """Return conversion factor from nanoseconds to the requested unit."""
+    try:
+        return _DATETIME_UNIT_TO_NS[unit]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported datetime unit {unit!r} for dimension {dim!r}. "
+            f"Choose from {sorted(_DATETIME_UNIT_TO_NS)}."
+        ) from exc
+
+
+def _convert_coord_values(obs_values, target_values, dim, coord_units):
+    """Convert coordinate arrays to numeric values in consistent units."""
+    obs_arr = np.asarray(obs_values)
+    target_arr = np.asarray(target_values)
+
+    if np.issubdtype(obs_arr.dtype, np.datetime64) or np.issubdtype(target_arr.dtype, np.datetime64):
+        if coord_units is None or dim not in coord_units:
+            raise ValueError(
+                f"Dimension {dim!r} is datetime-like; provide coord_units[{dim!r}]."
+            )
+        factor = _datetime_unit_factor(coord_units[dim], dim)
+        obs_ns = obs_arr.astype("datetime64[ns]").astype(np.int64)
+        target_ns = target_arr.astype("datetime64[ns]").astype(np.int64)
+        origin = min(obs_ns.min(), target_ns.min())
+        return (obs_ns - origin) / factor, (target_ns - origin) / factor
+
+    if obs_arr.dtype == object or target_arr.dtype == object:
+        raise ValueError(
+            f"Unsupported coordinate dtype for dimension {dim!r}. "
+            "Use numeric or numpy datetime64 coordinates."
+        )
+
+    return obs_arr.astype(float), target_arr.astype(float)
+
+
+def _prepare_target(target, interp_dims):
+    """Broadcast target coordinates and preserve output metadata."""
+    arrays = [target[dim] for dim in interp_dims]
+
+    if (
+        len(arrays) == 2
+        and arrays[0].ndim == 1
+        and arrays[1].ndim == 1
+        and arrays[0].dims != arrays[1].dims
+    ):
+        mesh = np.meshgrid(*(arr.values for arr in arrays), indexing="xy")
+        target_values = [mesh[0], mesh[1]]
+        output_dims = (interp_dims[1], interp_dims[0])
+        output_coords = {
+            interp_dims[0]: arrays[0].values,
+            interp_dims[1]: arrays[1].values,
+        }
+        target_shape = mesh[0].shape
+    else:
+        broadcast = xr.broadcast(*arrays)
+        target_values = [arr.values for arr in broadcast]
+        output_dims = broadcast[0].dims
+        output_coords = {k: v for k, v in target.coords.items()}
+        target_shape = broadcast[0].shape
+
+    return target_values, target_shape, output_dims, output_coords
+
+
+def _prepare_geometry(ds, target, interp_dims=None, coord_units=None):
+    """Normalize observation and target coordinates into numeric point arrays."""
+    interp_dims = _infer_interp_dims(ds, target, interp_dims=interp_dims)
+    obs_dim = _find_obs_dim(ds)
+    obs_values = [ds[dim].values for dim in interp_dims]
+    target_values, target_shape, output_dims, output_coords = _prepare_target(target, interp_dims)
+
+    obs_numeric = []
+    target_numeric = []
+    for dim, obs, tgt in zip(interp_dims, obs_values, target_values):
+        obs_num, tgt_num = _convert_coord_values(obs, tgt, dim, coord_units)
+        obs_numeric.append(np.asarray(obs_num).reshape(-1))
+        target_numeric.append(np.asarray(tgt_num).reshape(-1))
+
+    obs_points = np.column_stack(obs_numeric)
+    target_points = np.column_stack(target_numeric)
+
+    return {
+        "interp_dims": interp_dims,
+        "obs_dim": obs_dim,
+        "obs_points": obs_points,
+        "target_points": target_points,
+        "target_shape": target_shape,
+        "output_dims": output_dims,
+        "output_coords": output_coords,
+    }
+
+
+def _scalar_impl(backend):
+    """Select scalar interpolation backend."""
+    if backend == "numpy":
+        return _scalar_nd_numpy, _scalar_error_nd_numpy
+    if backend == "jax":
+        return _scalar_nd_jax, _scalar_error_nd_jax
+    raise ValueError(f"Unknown backend {backend!r}. Choose 'numpy' or 'jax'.")
+
+
+def _vector_impl(backend):
+    """Select vector interpolation backend."""
+    if backend == "numpy":
+        return {
+            "streamfunction": _streamfunction_nd_numpy,
+            "streamfunction_error": lambda *args, **kwargs: _single_component_vector_error_nd_numpy(
+                *args, **kwargs, nondivergent=True
+            ),
+            "velocity_potential": _velocity_potential_nd_numpy,
+            "velocity_potential_error": lambda *args, **kwargs: _single_component_vector_error_nd_numpy(
+                *args, **kwargs, nondivergent=False
+            ),
+            "helmholtz": _helmholtz_nd_numpy,
+            "helmholtz_error": _helmholtz_error_nd_numpy,
+        }
+    if backend == "jax":
+        return {
+            "streamfunction": _streamfunction_nd_jax,
+            "streamfunction_error": lambda *args, **kwargs: _single_component_vector_error_nd_jax(
+                *args, **kwargs, nondivergent=True
+            ),
+            "velocity_potential": _velocity_potential_nd_jax,
+            "velocity_potential_error": lambda *args, **kwargs: _single_component_vector_error_nd_jax(
+                *args, **kwargs, nondivergent=False
+            ),
+            "helmholtz": _helmholtz_nd_jax,
+            "helmholtz_error": _helmholtz_error_nd_jax,
+        }
+    raise ValueError(f"Unknown backend {backend!r}. Choose 'numpy' or 'jax'.")
 
 
 @xr.register_dataset_accessor("xobjmap")
 class XobjmapAccessor:
-    """
-    Xarray Dataset accessor for objective mapping.
-
-    The source Dataset should contain scattered observations with
-    coordinates along a single observation dimension.
-
-    Examples
-    --------
-    >>> import xobjmap
-    >>> obs = xr.Dataset(
-    ...     {"temp": ("station", [20.1, 19.5, 21.0])},
-    ...     coords={
-    ...         "lon": ("station", [-40.0, -39.5, -38.0]),
-    ...         "lat": ("station", [-23.0, -22.5, -23.5]),
-    ...     },
-    ... )
-    >>> target = xr.Dataset(
-    ...     coords={
-    ...         "lon": np.linspace(-40, -38, 20),
-    ...         "lat": np.linspace(-24, -22, 15),
-    ...     }
-    ... )
-    >>> result = obs.xobjmap.scalar(
-    ...     "temp", target, corrlen={"lon": 1.0, "lat": 1.0}, err=0.1,
-    ... )
-    """
+    """Xarray Dataset accessor for objective mapping."""
 
     def __init__(self, ds):
         self._ds = ds
 
-    def scalar(self, var, target, corrlen, err, backend="numpy", return_error=True):
-        """
-        Scalar objective analysis of a variable onto target locations.
-
-        Parameters
-        ----------
-        var : str
-            Name of the variable in the dataset to interpolate.
-        target : xr.Dataset
-            Target locations with coordinates as dimensions. If the
-            target has multiple dimensions (e.g., lon and lat), the
-            output is mapped onto the full grid (meshgrid).
-        corrlen : dict or float
-            Correlation length scales. If a dict, keys should be
-            coordinate names (e.g., ``{"lon": 1.0, "lat": 0.5}``).
-            If a float, isotropic correlation is assumed. Must be in
-            the same units as the coordinates.
-        err : float
-            Normalized random error variance (0 < err < 1).
-        backend : {"numpy", "jax"}, optional
-            Array backend to use. Use ``"jax"`` for lower memory
-            usage and optional GPU acceleration (requires JAX to be
-            installed). Default is ``"numpy"``.
-
-        Returns
-        -------
-        xr.Dataset
-            Dataset on the target coordinates with variables:
-            - ``{var}``: interpolated field
-            - ``error``: normalized mean squared error
-
-        Notes
-        -----
-        The correlation lengths must be in the same units as the
-        coordinates. If working with geographic coordinates (lon/lat
-        in degrees), convert to a projected coordinate system first,
-        or express corrlen in degrees.
-        """
+    def scalar(
+        self,
+        var,
+        target,
+        corrlen,
+        err,
+        interp_dims=None,
+        coord_units=None,
+        backend="numpy",
+        return_error=True,
+    ):
+        """Scalar objective analysis of a variable onto target locations."""
         ds = self._ds
-        coord_names = _find_coord_names(ds, target)
-        corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
-        cx, cy = coord_names
+        geom = _prepare_geometry(ds, target, interp_dims=interp_dims, coord_units=coord_units)
+        corrlen_values = _parse_corrlen(corrlen, geom["interp_dims"])
+        scalar_fn, scalar_error_fn = _scalar_impl(backend)
 
-        x_obs = ds[cx].values
-        y_obs = ds[cy].values
-        t_obs = ds[var].values
-
-        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
-
-        tp = _scalar(
-            Xg.ravel(), Yg.ravel(), x_obs, y_obs, t_obs,
-            corrlenx=corrlenx, corrleny=corrleny, err=err,
-            backend=backend,
+        values = ds[var].values
+        tp = scalar_fn(
+            geom["target_points"], geom["obs_points"], values, corrlen_values, err
         )
-        tp = np.asarray(tp).reshape(Xg.shape)
-        data_vars = {var: (dims, tp)}
+        data_vars = {var: (geom["output_dims"], np.asarray(tp).reshape(geom["target_shape"]))}
+
         if return_error:
-            ep = _scalar_error(
-                Xg.ravel(), Yg.ravel(), x_obs, y_obs,
-                corrlenx=corrlenx, corrleny=corrleny, err=err,
-                backend=backend,
+            ep = scalar_error_fn(
+                geom["target_points"], geom["obs_points"], corrlen_values, err
             )
-            data_vars["error"] = (dims, np.asarray(ep).reshape(Xg.shape))
+            data_vars["error"] = (
+                geom["output_dims"],
+                np.asarray(ep).reshape(geom["target_shape"]),
+            )
 
-        return xr.Dataset(data_vars, coords=coords)
+        return xr.Dataset(data_vars, coords=geom["output_coords"])
 
-    def scalar_error(self, target, corrlen, err, backend="numpy"):
+    def scalar_error(
+        self, target, corrlen, err, interp_dims=None, coord_units=None, backend="numpy"
+    ):
         """Return only scalar interpolation error for the target grid."""
         ds = self._ds
-        coord_names = _find_coord_names(ds, target)
-        corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
-        cx, cy = coord_names
-        x_obs = ds[cx].values
-        y_obs = ds[cy].values
-        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
-        ep = _scalar_error(
-            Xg.ravel(), Yg.ravel(), x_obs, y_obs,
-            corrlenx=corrlenx, corrleny=corrleny, err=err,
-            backend=backend,
+        geom = _prepare_geometry(ds, target, interp_dims=interp_dims, coord_units=coord_units)
+        corrlen_values = _parse_corrlen(corrlen, geom["interp_dims"])
+        _, scalar_error_fn = _scalar_impl(backend)
+        ep = scalar_error_fn(
+            geom["target_points"], geom["obs_points"], corrlen_values, err
         )
-        return xr.Dataset({"error": (dims, np.asarray(ep).reshape(Xg.shape))}, coords=coords)
+        return xr.Dataset(
+            {"error": (geom["output_dims"], np.asarray(ep).reshape(geom["target_shape"]))},
+            coords=geom["output_coords"],
+        )
 
-    def streamfunction(self, u_var, v_var, target, corrlen, err, b=0,
-                       backend="numpy", return_error=True):
-        """
-        Recover the streamfunction from scattered velocity observations.
-
-        Parameters
-        ----------
-        u_var : str
-            Name of the eastward velocity variable.
-        v_var : str
-            Name of the northward velocity variable.
-        target : xr.Dataset
-            Target grid with coordinates as dimensions.
-        corrlen : dict or float
-            Correlation length scales. Must be in the same units as
-            the coordinates.
-        err : float
-            Normalized random error variance (0 < err < 1).
-        b : float, optional
-            Mean correction parameter. Default is 0.
-
-        Returns
-        -------
-        xr.Dataset
-            Dataset on the target grid with variable ``psi``
-            (streamfunction).
-
-        Notes
-        -----
-        The correlation lengths must be in the same units as the
-        coordinates. If working with geographic coordinates (lon/lat
-        in degrees), convert to a projected coordinate system first,
-        or express corrlen in degrees.
-        """
+    def streamfunction(
+        self,
+        u_var,
+        v_var,
+        target,
+        corrlen,
+        err,
+        derivative_dims=None,
+        interp_dims=None,
+        coord_units=None,
+        b=0,
+        backend="numpy",
+        return_error=True,
+    ):
+        """Recover the streamfunction from scattered velocity observations."""
         ds = self._ds
-        coord_names = _find_coord_names(ds, target)
-        corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
-        cx, cy = coord_names
+        interp_dims = _infer_interp_dims(ds, target, interp_dims=interp_dims)
+        derivative_dims = _validate_derivative_dims(ds, interp_dims, derivative_dims)
+        geom = _prepare_geometry(ds, target, interp_dims=interp_dims, coord_units=coord_units)
+        derivative_indices = tuple(geom["interp_dims"].index(dim) for dim in derivative_dims)
+        corrlen_values = _parse_corrlen(corrlen, geom["interp_dims"])
+        impl = _vector_impl(backend)
 
-        x_obs = ds[cx].values
-        y_obs = ds[cy].values
-        u_obs = ds[u_var].values
-        v_obs = ds[v_var].values
-
-        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
-
-        psi = _streamfunction(
-            Xg, Yg, x_obs, y_obs, u_obs, v_obs,
-            corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
-            backend=backend,
+        psi = impl["streamfunction"](
+            geom["target_points"],
+            geom["obs_points"],
+            ds[u_var].values,
+            ds[v_var].values,
+            corrlen_values,
+            derivative_indices,
+            err,
+            b=b,
         )
+        data_vars = {"psi": (geom["output_dims"], np.asarray(psi).reshape(geom["target_shape"]))}
 
-        data_vars = {"psi": (dims, psi)}
         if return_error:
-            psi_error = _streamfunction_error(
-                Xg, Yg, x_obs, y_obs, u_obs, v_obs,
-                corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
-                backend=backend,
+            psi_error = impl["streamfunction_error"](
+                geom["target_points"],
+                geom["obs_points"],
+                corrlen_values,
+                derivative_indices,
+                err,
+                b=b,
             )
-            data_vars["psi_error"] = (dims, np.asarray(psi_error))
+            data_vars["psi_error"] = (
+                geom["output_dims"],
+                np.asarray(psi_error).reshape(geom["target_shape"]),
+            )
 
-        return xr.Dataset(data_vars, coords=coords)
+        return xr.Dataset(data_vars, coords=geom["output_coords"])
 
-    def streamfunction_error(self, u_var, v_var, target, corrlen, err, b=0, backend="numpy"):
+    def streamfunction_error(
+        self,
+        u_var,
+        v_var,
+        target,
+        corrlen,
+        err,
+        derivative_dims=None,
+        interp_dims=None,
+        coord_units=None,
+        b=0,
+        backend="numpy",
+    ):
         """Return only streamfunction posterior error for the target grid."""
         ds = self._ds
-        coord_names = _find_coord_names(ds, target)
-        corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
-        cx, cy = coord_names
-        x_obs = ds[cx].values
-        y_obs = ds[cy].values
-        u_obs = ds[u_var].values
-        v_obs = ds[v_var].values
-        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
-        psi_error = _streamfunction_error(
-            Xg, Yg, x_obs, y_obs, u_obs, v_obs,
-            corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
-            backend=backend,
+        interp_dims = _infer_interp_dims(ds, target, interp_dims=interp_dims)
+        derivative_dims = _validate_derivative_dims(ds, interp_dims, derivative_dims)
+        geom = _prepare_geometry(ds, target, interp_dims=interp_dims, coord_units=coord_units)
+        derivative_indices = tuple(geom["interp_dims"].index(dim) for dim in derivative_dims)
+        corrlen_values = _parse_corrlen(corrlen, geom["interp_dims"])
+        impl = _vector_impl(backend)
+        psi_error = impl["streamfunction_error"](
+            geom["target_points"],
+            geom["obs_points"],
+            corrlen_values,
+            derivative_indices,
+            err,
+            b=b,
         )
-        return xr.Dataset({"psi_error": (dims, np.asarray(psi_error))}, coords=coords)
+        return xr.Dataset(
+            {"psi_error": (geom["output_dims"], np.asarray(psi_error).reshape(geom["target_shape"]))},
+            coords=geom["output_coords"],
+        )
 
-    def velocity_potential(self, u_var, v_var, target, corrlen, err, b=0,
-                           backend="numpy", return_error=True):
-        """
-        Recover the velocity potential from scattered velocity observations.
-
-        Parameters
-        ----------
-        u_var : str
-            Name of the eastward velocity variable.
-        v_var : str
-            Name of the northward velocity variable.
-        target : xr.Dataset
-            Target grid with coordinates as dimensions.
-        corrlen : dict or float
-            Correlation length scales. Must be in the same units as
-            the coordinates.
-        err : float
-            Normalized random error variance (0 < err < 1).
-        b : float, optional
-            Mean correction parameter. Default is 0.
-
-        Returns
-        -------
-        xr.Dataset
-            Dataset on the target grid with variable ``chi``
-            (velocity potential).
-
-        Notes
-        -----
-        The correlation lengths must be in the same units as the
-        coordinates. If working with geographic coordinates (lon/lat
-        in degrees), convert to a projected coordinate system first,
-        or express corrlen in degrees.
-        """
+    def velocity_potential(
+        self,
+        u_var,
+        v_var,
+        target,
+        corrlen,
+        err,
+        derivative_dims=None,
+        interp_dims=None,
+        coord_units=None,
+        b=0,
+        backend="numpy",
+        return_error=True,
+    ):
+        """Recover the velocity potential from scattered velocity observations."""
         ds = self._ds
-        coord_names = _find_coord_names(ds, target)
-        corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
-        cx, cy = coord_names
+        interp_dims = _infer_interp_dims(ds, target, interp_dims=interp_dims)
+        derivative_dims = _validate_derivative_dims(ds, interp_dims, derivative_dims)
+        geom = _prepare_geometry(ds, target, interp_dims=interp_dims, coord_units=coord_units)
+        derivative_indices = tuple(geom["interp_dims"].index(dim) for dim in derivative_dims)
+        corrlen_values = _parse_corrlen(corrlen, geom["interp_dims"])
+        impl = _vector_impl(backend)
 
-        x_obs = ds[cx].values
-        y_obs = ds[cy].values
-        u_obs = ds[u_var].values
-        v_obs = ds[v_var].values
-
-        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
-
-        chi = _velocity_potential(
-            Xg, Yg, x_obs, y_obs, u_obs, v_obs,
-            corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
-            backend=backend,
+        chi = impl["velocity_potential"](
+            geom["target_points"],
+            geom["obs_points"],
+            ds[u_var].values,
+            ds[v_var].values,
+            corrlen_values,
+            derivative_indices,
+            err,
+            b=b,
         )
+        data_vars = {"chi": (geom["output_dims"], np.asarray(chi).reshape(geom["target_shape"]))}
 
-        data_vars = {"chi": (dims, chi)}
         if return_error:
-            chi_error = _velocity_potential_error(
-                Xg, Yg, x_obs, y_obs, u_obs, v_obs,
-                corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
-                backend=backend,
+            chi_error = impl["velocity_potential_error"](
+                geom["target_points"],
+                geom["obs_points"],
+                corrlen_values,
+                derivative_indices,
+                err,
+                b=b,
             )
-            data_vars["chi_error"] = (dims, np.asarray(chi_error))
+            data_vars["chi_error"] = (
+                geom["output_dims"],
+                np.asarray(chi_error).reshape(geom["target_shape"]),
+            )
 
-        return xr.Dataset(data_vars, coords=coords)
+        return xr.Dataset(data_vars, coords=geom["output_coords"])
 
-    def velocity_potential_error(self, u_var, v_var, target, corrlen, err, b=0,
-                                 backend="numpy"):
+    def velocity_potential_error(
+        self,
+        u_var,
+        v_var,
+        target,
+        corrlen,
+        err,
+        derivative_dims=None,
+        interp_dims=None,
+        coord_units=None,
+        b=0,
+        backend="numpy",
+    ):
         """Return only velocity-potential posterior error for the target grid."""
         ds = self._ds
-        coord_names = _find_coord_names(ds, target)
-        corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
-        cx, cy = coord_names
-        x_obs = ds[cx].values
-        y_obs = ds[cy].values
-        u_obs = ds[u_var].values
-        v_obs = ds[v_var].values
-        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
-        chi_error = _velocity_potential_error(
-            Xg, Yg, x_obs, y_obs, u_obs, v_obs,
-            corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
-            backend=backend,
+        interp_dims = _infer_interp_dims(ds, target, interp_dims=interp_dims)
+        derivative_dims = _validate_derivative_dims(ds, interp_dims, derivative_dims)
+        geom = _prepare_geometry(ds, target, interp_dims=interp_dims, coord_units=coord_units)
+        derivative_indices = tuple(geom["interp_dims"].index(dim) for dim in derivative_dims)
+        corrlen_values = _parse_corrlen(corrlen, geom["interp_dims"])
+        impl = _vector_impl(backend)
+        chi_error = impl["velocity_potential_error"](
+            geom["target_points"],
+            geom["obs_points"],
+            corrlen_values,
+            derivative_indices,
+            err,
+            b=b,
         )
-        return xr.Dataset({"chi_error": (dims, np.asarray(chi_error))}, coords=coords)
+        return xr.Dataset(
+            {"chi_error": (geom["output_dims"], np.asarray(chi_error).reshape(geom["target_shape"]))},
+            coords=geom["output_coords"],
+        )
 
-    def helmholtz(self, u_var, v_var, target, corrlen_psi, corrlen_chi,
-                  err, b=0, backend="numpy", return_error=True):
-        """
-        Helmholtz decomposition: recover streamfunction and velocity
-        potential from scattered velocity observations.
-
-        Parameters
-        ----------
-        u_var : str
-            Name of the eastward velocity variable.
-        v_var : str
-            Name of the northward velocity variable.
-        target : xr.Dataset
-            Target grid with coordinates as dimensions.
-        corrlen_psi : dict or float
-            Correlation length scales for the streamfunction.
-        corrlen_chi : dict or float
-            Correlation length scales for the velocity potential.
-        err : float
-            Normalized random error variance (0 < err < 1).
-        b : float, optional
-            Mean correction parameter. Default is 0.
-
-        Returns
-        -------
-        xr.Dataset
-            Dataset on the target grid with variables ``psi``
-            (streamfunction), ``chi`` (velocity potential),
-            ``psi_error`` and ``chi_error`` (normalized posterior errors).
-
-        Notes
-        -----
-        The correlation lengths must be in the same units as the
-        coordinates. If working with geographic coordinates (lon/lat
-        in degrees), convert to a projected coordinate system first,
-        or express corrlen in degrees.
-        """
+    def helmholtz(
+        self,
+        u_var,
+        v_var,
+        target,
+        corrlen_psi,
+        corrlen_chi,
+        err,
+        derivative_dims=None,
+        interp_dims=None,
+        coord_units=None,
+        b=0,
+        backend="numpy",
+        return_error=True,
+    ):
+        """Recover streamfunction and velocity potential from scattered observations."""
         ds = self._ds
-        coord_names = _find_coord_names(ds, target)
-        corrlenx_psi, corrleny_psi = _parse_corrlen(corrlen_psi, coord_names)
-        corrlenx_chi, corrleny_chi = _parse_corrlen(corrlen_chi, coord_names)
-        cx, cy = coord_names
+        interp_dims = _infer_interp_dims(ds, target, interp_dims=interp_dims)
+        derivative_dims = _validate_derivative_dims(ds, interp_dims, derivative_dims)
+        geom = _prepare_geometry(ds, target, interp_dims=interp_dims, coord_units=coord_units)
+        derivative_indices = tuple(geom["interp_dims"].index(dim) for dim in derivative_dims)
+        corrlen_psi_values = _parse_corrlen(corrlen_psi, geom["interp_dims"])
+        corrlen_chi_values = _parse_corrlen(corrlen_chi, geom["interp_dims"])
+        impl = _vector_impl(backend)
 
-        x_obs = ds[cx].values
-        y_obs = ds[cy].values
-        u_obs = ds[u_var].values
-        v_obs = ds[v_var].values
-
-        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
-
-        psi, chi = _helmholtz(
-            Xg, Yg, x_obs, y_obs, u_obs, v_obs,
-            corrlenx_psi=corrlenx_psi, corrleny_psi=corrleny_psi,
-            corrlenx_chi=corrlenx_chi, corrleny_chi=corrleny_chi,
-            err=err, b=b, backend=backend,
+        psi, chi = impl["helmholtz"](
+            geom["target_points"],
+            geom["obs_points"],
+            ds[u_var].values,
+            ds[v_var].values,
+            corrlen_psi_values,
+            corrlen_chi_values,
+            derivative_indices,
+            err,
+            b=b,
         )
+        data_vars = {
+            "psi": (geom["output_dims"], np.asarray(psi).reshape(geom["target_shape"])),
+            "chi": (geom["output_dims"], np.asarray(chi).reshape(geom["target_shape"])),
+        }
 
-        data_vars = {"psi": (dims, psi), "chi": (dims, chi)}
         if return_error:
-            psi_error, chi_error = _helmholtz_error(
-                Xg, Yg, x_obs, y_obs, u_obs, v_obs,
-                corrlenx_psi=corrlenx_psi, corrleny_psi=corrleny_psi,
-                corrlenx_chi=corrlenx_chi, corrleny_chi=corrleny_chi,
-                err=err, b=b, backend=backend,
+            psi_error, chi_error = impl["helmholtz_error"](
+                geom["target_points"],
+                geom["obs_points"],
+                corrlen_psi_values,
+                corrlen_chi_values,
+                derivative_indices,
+                err,
+                b=b,
             )
-            data_vars["psi_error"] = (dims, np.asarray(psi_error))
-            data_vars["chi_error"] = (dims, np.asarray(chi_error))
+            data_vars["psi_error"] = (
+                geom["output_dims"],
+                np.asarray(psi_error).reshape(geom["target_shape"]),
+            )
+            data_vars["chi_error"] = (
+                geom["output_dims"],
+                np.asarray(chi_error).reshape(geom["target_shape"]),
+            )
 
-        return xr.Dataset(data_vars, coords=coords)
+        return xr.Dataset(data_vars, coords=geom["output_coords"])
 
-    def helmholtz_error(self, u_var, v_var, target, corrlen_psi, corrlen_chi,
-                        err, b=0, backend="numpy"):
+    def helmholtz_error(
+        self,
+        u_var,
+        v_var,
+        target,
+        corrlen_psi,
+        corrlen_chi,
+        err,
+        derivative_dims=None,
+        interp_dims=None,
+        coord_units=None,
+        b=0,
+        backend="numpy",
+    ):
         """Return only Helmholtz posterior errors for the target grid."""
         ds = self._ds
-        coord_names = _find_coord_names(ds, target)
-        corrlenx_psi, corrleny_psi = _parse_corrlen(corrlen_psi, coord_names)
-        corrlenx_chi, corrleny_chi = _parse_corrlen(corrlen_chi, coord_names)
-        cx, cy = coord_names
-        x_obs = ds[cx].values
-        y_obs = ds[cy].values
-        u_obs = ds[u_var].values
-        v_obs = ds[v_var].values
-        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
-        psi_error, chi_error = _helmholtz_error(
-            Xg, Yg, x_obs, y_obs, u_obs, v_obs,
-            corrlenx_psi=corrlenx_psi, corrleny_psi=corrleny_psi,
-            corrlenx_chi=corrlenx_chi, corrleny_chi=corrleny_chi,
-            err=err, b=b, backend=backend,
+        interp_dims = _infer_interp_dims(ds, target, interp_dims=interp_dims)
+        derivative_dims = _validate_derivative_dims(ds, interp_dims, derivative_dims)
+        geom = _prepare_geometry(ds, target, interp_dims=interp_dims, coord_units=coord_units)
+        derivative_indices = tuple(geom["interp_dims"].index(dim) for dim in derivative_dims)
+        corrlen_psi_values = _parse_corrlen(corrlen_psi, geom["interp_dims"])
+        corrlen_chi_values = _parse_corrlen(corrlen_chi, geom["interp_dims"])
+        impl = _vector_impl(backend)
+        psi_error, chi_error = impl["helmholtz_error"](
+            geom["target_points"],
+            geom["obs_points"],
+            corrlen_psi_values,
+            corrlen_chi_values,
+            derivative_indices,
+            err,
+            b=b,
         )
         return xr.Dataset(
             {
-                "psi_error": (dims, np.asarray(psi_error)),
-                "chi_error": (dims, np.asarray(chi_error)),
+                "psi_error": (
+                    geom["output_dims"],
+                    np.asarray(psi_error).reshape(geom["target_shape"]),
+                ),
+                "chi_error": (
+                    geom["output_dims"],
+                    np.asarray(chi_error).reshape(geom["target_shape"]),
+                ),
             },
-            coords=coords,
+            coords=geom["output_coords"],
         )

@@ -387,11 +387,11 @@ def _helmholtz_error_jax(xc, yc, x, y,
         chi_err = 1.0 - (2.0 * lambd_chi) * jnp.dot(p_chi, jnp.linalg.solve(A_k, p_chi)) / var0_chi
         return jnp.clip(psi_err, 0.0, 1.0), jnp.clip(chi_err, 0.0, 1.0)
 
+    target_shape = xc.shape
     psi_err, chi_err = jax.lax.map(
-        _local_error, (xc.T.ravel(), xc_psi.T.ravel(), xc_chi.T.ravel(), yc.T.ravel())
+        _local_error, (xc.ravel(), xc_psi.ravel(), xc_chi.ravel(), yc.ravel())
     )
-    nv1, nv2 = xc.shape
-    return psi_err.reshape(nv2, nv1).T, chi_err.reshape(nv2, nv1).T
+    return psi_err.reshape(target_shape), chi_err.reshape(target_shape)
 
 
 def _streamfunction_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
@@ -421,9 +421,9 @@ def _streamfunction_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
     w, _ = cg(matvec, uv, maxiter=maxiter)
 
     # Cross-covariance kernel sum: P @ w for streamfunction
-    nv1, nv2 = xc.shape
-    xc_flat = xc.T.ravel()
-    yc_flat = yc.T.ravel()
+    target_shape = xc.shape
+    xc_flat = xc.ravel()
+    yc_flat = yc.ravel()
     w_u, w_v = w[:n], w[n:]
 
     @jax.jit
@@ -442,7 +442,7 @@ def _streamfunction_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
         return jax.lax.map(_one, (xc_flat, yc_flat))
 
     psi = _psi_vec(w_u, w_v)
-    return psi.reshape(nv2, nv1).T
+    return psi.reshape(target_shape)
 
 
 def _velocity_potential_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
@@ -472,9 +472,9 @@ def _velocity_potential_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
     w, _ = cg(matvec, uv, maxiter=maxiter)
 
     # Cross-covariance kernel sum: P @ w for velocity potential
-    nv1, nv2 = xc.shape
-    xc_flat = xc.T.ravel()
-    yc_flat = yc.T.ravel()
+    target_shape = xc.shape
+    xc_flat = xc.ravel()
+    yc_flat = yc.ravel()
     w_u, w_v = w[:n], w[n:]
 
     @jax.jit
@@ -493,7 +493,7 @@ def _velocity_potential_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
         return jax.lax.map(_one, (xc_flat, yc_flat))
 
     chi = _chi_vec(w_u, w_v)
-    return chi.reshape(nv2, nv1).T
+    return chi.reshape(target_shape)
 
 
 def _helmholtz_jax(xc, yc, x, y, u, v,
@@ -549,11 +549,10 @@ def _helmholtz_jax(xc, yc, x, y, u, v,
     w_u, w_v = w[:n], w[n:]
 
     # Target grid
-    nv1, nv2 = xc_psi.shape
-    xc_psi_flat = xc_psi.T.ravel()
-    xc_chi_flat = xc_chi.T.ravel()
-    xc_flat = jnp.asarray(xc, dtype=jnp.float32).T.ravel()
-    yc_flat = yc_arr.T.ravel()
+    target_shape = xc_psi.shape
+    xc_psi_flat = xc_psi.ravel()
+    xc_chi_flat = xc_chi.ravel()
+    yc_flat = yc_arr.ravel()
 
     @jax.jit
     def _psi_chi_vec(w_u, w_v):
@@ -584,8 +583,8 @@ def _helmholtz_jax(xc, yc, x, y, u, v,
         return psi, chi
 
     psi, chi = _psi_chi_vec(w_u, w_v)
-    psi = psi.reshape(nv2, nv1).T
-    chi = chi.reshape(nv2, nv1).T
+    psi = psi.reshape(target_shape)
+    chi = chi.reshape(target_shape)
 
     return psi, chi
 
@@ -651,6 +650,491 @@ def _velocity_cov_block_jax(t, d2, lambd, bmo, nondivergent=True):
     A = A.at[n : 2 * n, 0:n].set(A[0:n, n : 2 * n])
     A = A.at[n : 2 * n, n : 2 * n].set((jnp.sin(t) ** 2) * (R - S) + S)
     return A
+
+
+def _scaled_sqdist_numpy(points1, points2, corrlen):
+    """Pairwise normalized squared distance for N-D scalar interpolation."""
+    p1 = np.asarray(points1, dtype=float)
+    p2 = np.asarray(points2, dtype=float)
+    scale = np.asarray(corrlen, dtype=float)
+    diff = (p2[None, :, :] - p1[:, None, :]) / scale[None, None, :]
+    return np.sum(diff ** 2, axis=2)
+
+
+def _scaled_sqdist_jax(points1, points2, corrlen):
+    """JAX pairwise normalized squared distance for N-D scalar interpolation."""
+    import jax.numpy as jnp
+
+    p1 = jnp.asarray(points1, dtype=jnp.float32)
+    p2 = jnp.asarray(points2, dtype=jnp.float32)
+    scale = jnp.asarray(corrlen, dtype=jnp.float32)
+    diff = (p2[None, :, :] - p1[:, None, :]) / scale[None, None, :]
+    return jnp.sum(diff ** 2, axis=2)
+
+
+def _scalar_nd_numpy(target_points, obs_points, values, corrlen, err):
+    """Dense N-D scalar interpolation (numpy)."""
+    d2 = _scaled_sqdist_numpy(obs_points, obs_points, corrlen)
+    dc2 = _scaled_sqdist_numpy(target_points, obs_points, corrlen)
+    a = (1.0 - err) * np.exp(-d2) + err * np.eye(len(obs_points))
+    c = (1.0 - err) * np.exp(-dc2)
+    t = np.asarray(values, dtype=float).reshape(len(obs_points), 1)
+    return np.dot(c, np.linalg.solve(a, t)).reshape(-1)
+
+
+def _scalar_nd_jax(target_points, obs_points, values, corrlen, err):
+    """Matrix-free N-D scalar interpolation (JAX)."""
+    import jax
+    import jax.numpy as jnp
+    from jax.scipy.sparse.linalg import cg
+
+    obs_points = jnp.asarray(obs_points, dtype=jnp.float32)
+    target_points = jnp.asarray(target_points, dtype=jnp.float32)
+    corrlen = jnp.asarray(corrlen, dtype=jnp.float32)
+
+    n = obs_points.shape[0]
+    one_m_err = 1.0 - err
+    maxiter = min(n, 200)
+
+    if n <= 512:
+        chunk = n
+        obs_rows = obs_points
+    else:
+        chunk = 512
+        rem = n % chunk
+        if rem:
+            pad = chunk - rem
+            obs_rows = jnp.pad(obs_points, ((0, pad), (0, 0)))
+        else:
+            obs_rows = obs_points
+    n_padded = obs_rows.shape[0]
+    n_chunks = n_padded // chunk
+
+    def _matvec_body(i, carry):
+        v, result = carry
+        i0 = i * chunk
+        rows = jax.lax.dynamic_slice(obs_rows, (i0, 0), (chunk, obs_rows.shape[1]))
+        diff = (rows[:, None, :] - obs_points[None, :, :]) / corrlen[None, None, :]
+        d2 = jnp.sum(diff ** 2, axis=2)
+        kv = one_m_err * (jnp.exp(-d2) @ v)
+        prev = jax.lax.dynamic_slice(result, (i0,), (chunk,))
+        result = jax.lax.dynamic_update_slice(result, prev + kv, (i0,))
+        return v, result
+
+    @jax.jit
+    def matvec(v):
+        result = jnp.zeros(n_padded, dtype=jnp.float32)
+        result = result.at[:n].set(err * v)
+        _, result = jax.lax.fori_loop(0, n_chunks, _matvec_body, (v, result))
+        return result[:n]
+
+    @jax.jit
+    def _cross_cov_vec(weights):
+        def _one(point):
+            diff = (point[None, :] - obs_points) / corrlen[None, :]
+            d2 = jnp.sum(diff ** 2, axis=1)
+            return one_m_err * jnp.dot(jnp.exp(-d2), weights)
+        return jax.lax.map(_one, target_points)
+
+    t_vec = jnp.asarray(values, dtype=jnp.float32).ravel()
+    w, _ = cg(matvec, t_vec, maxiter=maxiter)
+    return _cross_cov_vec(w).reshape(-1)
+
+
+def _scalar_error_nd_numpy(target_points, obs_points, corrlen, err):
+    """Dense N-D scalar posterior error (numpy)."""
+    d2 = _scaled_sqdist_numpy(obs_points, obs_points, corrlen)
+    dc2 = _scaled_sqdist_numpy(target_points, obs_points, corrlen)
+    a = (1.0 - err) * np.exp(-d2) + err * np.eye(len(obs_points))
+    c = (1.0 - err) * np.exp(-dc2)
+    return 1.0 - np.sum(c.T * np.linalg.solve(a, c.T), axis=0) / (1.0 - err)
+
+
+def _scalar_error_nd_jax(target_points, obs_points, corrlen, err):
+    """Local-neighborhood N-D scalar posterior error (JAX)."""
+    import jax
+    import jax.numpy as jnp
+
+    obs_points = jnp.asarray(obs_points, dtype=jnp.float32)
+    target_points = jnp.asarray(target_points, dtype=jnp.float32)
+    corrlen = jnp.asarray(corrlen, dtype=jnp.float32)
+
+    n = obs_points.shape[0]
+    one_m_err = 1.0 - err
+    k = min(n, min(n, 100))
+
+    @jax.jit
+    def _local_error(point):
+        diff_all = (point[None, :] - obs_points) / corrlen[None, :]
+        d2_all = jnp.sum(diff_all ** 2, axis=1)
+        _, idx = jax.lax.top_k(-d2_all, k)
+        obs_local = obs_points[idx]
+        diff_kk = (obs_local[None, :, :] - obs_local[:, None, :]) / corrlen[None, None, :]
+        d2_kk = jnp.sum(diff_kk ** 2, axis=2)
+        a_local = one_m_err * jnp.exp(-d2_kk) + err * jnp.eye(k, dtype=jnp.float32)
+        diff_ck = (point[None, :] - obs_local) / corrlen[None, :]
+        d2_ck = jnp.sum(diff_ck ** 2, axis=1)
+        c_local = one_m_err * jnp.exp(-d2_ck)
+        return 1.0 - jnp.dot(c_local, jnp.linalg.solve(a_local, c_local)) / one_m_err
+
+    return jax.lax.map(_local_error, target_points)
+
+
+def _vector_scale_params_numpy(corrlen, derivative_indices):
+    """Return anisotropic coordinate scaling and reference lambda."""
+    corrlen = np.asarray(corrlen, dtype=float)
+    ref = float(corrlen[derivative_indices[1]])
+    return ref / corrlen, 1.0 / ref ** 2
+
+
+def _vector_scale_params_jax(corrlen, derivative_indices):
+    """JAX version of `_vector_scale_params_numpy`."""
+    import jax.numpy as jnp
+
+    corrlen = jnp.asarray(corrlen, dtype=jnp.float32)
+    ref = corrlen[derivative_indices[1]]
+    return ref / corrlen, 1.0 / ref ** 2
+
+
+def _vector_obs_geometry_numpy(obs_points, corrlen, derivative_indices):
+    """Scaled observation geometry for vector-potential methods."""
+    scale, lambd = _vector_scale_params_numpy(corrlen, derivative_indices)
+    obs_scaled = np.asarray(obs_points, dtype=float) * scale[None, :]
+    ix, iy = derivative_indices
+    dx = obs_scaled[None, :, ix] - obs_scaled[:, None, ix]
+    dy = obs_scaled[None, :, iy] - obs_scaled[:, None, iy]
+    total_d2 = np.sum((obs_scaled[None, :, :] - obs_scaled[:, None, :]) ** 2, axis=2)
+    return np.arctan2(dy, dx), dx ** 2 + dy ** 2, total_d2, lambd
+
+
+def _vector_target_geometry_numpy(target_points, obs_points, corrlen, derivative_indices):
+    """Scaled target-observation geometry for vector-potential methods."""
+    scale, lambd = _vector_scale_params_numpy(corrlen, derivative_indices)
+    target_scaled = np.asarray(target_points, dtype=float) * scale[None, :]
+    obs_scaled = np.asarray(obs_points, dtype=float) * scale[None, :]
+    ix, iy = derivative_indices
+    dx = obs_scaled[None, :, ix] - target_scaled[:, None, ix]
+    dy = obs_scaled[None, :, iy] - target_scaled[:, None, iy]
+    total_d2 = np.sum((obs_scaled[None, :, :] - target_scaled[:, None, :]) ** 2, axis=2)
+    return np.arctan2(dy, dx), dx ** 2 + dy ** 2, total_d2, lambd
+
+
+def _vector_obs_geometry_jax(obs_points, corrlen, derivative_indices):
+    """JAX scaled observation geometry for vector-potential methods."""
+    import jax.numpy as jnp
+
+    scale, lambd = _vector_scale_params_jax(corrlen, derivative_indices)
+    obs_scaled = jnp.asarray(obs_points, dtype=jnp.float32) * scale[None, :]
+    ix, iy = derivative_indices
+    dx = obs_scaled[None, :, ix] - obs_scaled[:, None, ix]
+    dy = obs_scaled[None, :, iy] - obs_scaled[:, None, iy]
+    total_d2 = jnp.sum((obs_scaled[None, :, :] - obs_scaled[:, None, :]) ** 2, axis=2)
+    return jnp.arctan2(dy, dx), dx ** 2 + dy ** 2, total_d2, lambd
+
+
+def _vector_target_geometry_jax(target_points, obs_points, corrlen, derivative_indices):
+    """JAX scaled target-observation geometry for vector-potential methods."""
+    import jax.numpy as jnp
+
+    scale, lambd = _vector_scale_params_jax(corrlen, derivative_indices)
+    target_scaled = jnp.asarray(target_points, dtype=jnp.float32) * scale[None, :]
+    obs_scaled = jnp.asarray(obs_points, dtype=jnp.float32) * scale[None, :]
+    ix, iy = derivative_indices
+    dx = obs_scaled[None, :, ix] - target_scaled[:, None, ix]
+    dy = obs_scaled[None, :, iy] - target_scaled[:, None, iy]
+    total_d2 = jnp.sum((obs_scaled[None, :, :] - target_scaled[:, None, :]) ** 2, axis=2)
+    return jnp.arctan2(dy, dx), dx ** 2 + dy ** 2, total_d2, lambd
+
+
+def _cross_cov_nd_numpy(target_points, obs_points, corrlen, derivative_indices, bmo,
+                        nondivergent=True):
+    """Cross-covariance matrix for streamfunction/velocity potential in N-D."""
+    theta, spatial_d2, total_d2, lambd = _vector_target_geometry_numpy(
+        target_points, obs_points, corrlen, derivative_indices
+    )
+    rc = np.exp(-lambd * total_d2) + bmo
+    sqrt_d2 = np.sqrt(spatial_d2)
+    n_target, n_obs = total_d2.shape
+    p = np.zeros((n_target, 2 * n_obs))
+    if nondivergent:
+        p[:, 0:n_obs] = np.sin(theta) * sqrt_d2 * rc
+        p[:, n_obs:2 * n_obs] = -np.cos(theta) * sqrt_d2 * rc
+    else:
+        p[:, 0:n_obs] = -np.cos(theta) * sqrt_d2 * rc
+        p[:, n_obs:2 * n_obs] = -np.sin(theta) * sqrt_d2 * rc
+    return p, lambd
+
+
+def _cross_cov_nd_jax(target_points, obs_points, corrlen, derivative_indices, bmo,
+                      nondivergent=True):
+    """JAX cross-covariance matrix for streamfunction/velocity potential in N-D."""
+    import jax.numpy as jnp
+
+    theta, spatial_d2, total_d2, lambd = _vector_target_geometry_jax(
+        target_points, obs_points, corrlen, derivative_indices
+    )
+    rc = jnp.exp(-lambd * total_d2) + bmo
+    sqrt_d2 = jnp.sqrt(spatial_d2)
+    if nondivergent:
+        p = jnp.concatenate([
+            jnp.sin(theta) * sqrt_d2 * rc,
+            -jnp.cos(theta) * sqrt_d2 * rc,
+        ], axis=1)
+    else:
+        p = jnp.concatenate([
+            -jnp.cos(theta) * sqrt_d2 * rc,
+            -jnp.sin(theta) * sqrt_d2 * rc,
+        ], axis=1)
+    return p, lambd
+
+
+def _streamfunction_nd_numpy(target_points, obs_points, u, v, corrlen, derivative_indices,
+                             err, b=0):
+    """Dense N-D streamfunction recovery (numpy)."""
+    theta, spatial_d2, total_d2, lambd = _vector_obs_geometry_numpy(
+        obs_points, corrlen, derivative_indices
+    )
+    n = len(obs_points)
+    bmo = b * err / lambd
+    a = _velocity_cov_block(theta, spatial_d2, lambd, bmo, nondivergent=True) + err * np.eye(2 * n)
+    uv = np.hstack((u, v)).reshape(-1, 1)
+    p, _ = _cross_cov_nd_numpy(
+        target_points, obs_points, corrlen, derivative_indices, bmo, nondivergent=True
+    )
+    return np.dot(p, np.linalg.solve(a, uv)).reshape(-1)
+
+
+def _streamfunction_nd_jax(target_points, obs_points, u, v, corrlen, derivative_indices,
+                           err, b=0):
+    """Dense N-D streamfunction recovery (JAX)."""
+    import jax.numpy as jnp
+
+    theta, spatial_d2, total_d2, lambd = _vector_obs_geometry_jax(
+        obs_points, corrlen, derivative_indices
+    )
+    n = theta.shape[0]
+    bmo = b * err / lambd
+    a = _velocity_cov_block_jax(theta, spatial_d2, lambd, bmo, nondivergent=True) + err * jnp.eye(2 * n, dtype=jnp.float32)
+    uv = jnp.concatenate([
+        jnp.asarray(u, dtype=jnp.float32).ravel(),
+        jnp.asarray(v, dtype=jnp.float32).ravel(),
+    ]).reshape(-1, 1)
+    p, _ = _cross_cov_nd_jax(
+        target_points, obs_points, corrlen, derivative_indices, bmo, nondivergent=True
+    )
+    return jnp.dot(p, jnp.linalg.solve(a, uv)).reshape(-1)
+
+
+def _velocity_potential_nd_numpy(target_points, obs_points, u, v, corrlen, derivative_indices,
+                                 err, b=0):
+    """Dense N-D velocity-potential recovery (numpy)."""
+    theta, spatial_d2, total_d2, lambd = _vector_obs_geometry_numpy(
+        obs_points, corrlen, derivative_indices
+    )
+    n = len(obs_points)
+    bmo = b * err / lambd
+    a = _velocity_cov_block(theta, spatial_d2, lambd, bmo, nondivergent=False) + err * np.eye(2 * n)
+    uv = np.hstack((u, v)).reshape(-1, 1)
+    p, _ = _cross_cov_nd_numpy(
+        target_points, obs_points, corrlen, derivative_indices, bmo, nondivergent=False
+    )
+    return np.dot(p, np.linalg.solve(a, uv)).reshape(-1)
+
+
+def _velocity_potential_nd_jax(target_points, obs_points, u, v, corrlen, derivative_indices,
+                               err, b=0):
+    """Dense N-D velocity-potential recovery (JAX)."""
+    import jax.numpy as jnp
+
+    theta, spatial_d2, total_d2, lambd = _vector_obs_geometry_jax(
+        obs_points, corrlen, derivative_indices
+    )
+    n = theta.shape[0]
+    bmo = b * err / lambd
+    a = _velocity_cov_block_jax(theta, spatial_d2, lambd, bmo, nondivergent=False) + err * jnp.eye(2 * n, dtype=jnp.float32)
+    uv = jnp.concatenate([
+        jnp.asarray(u, dtype=jnp.float32).ravel(),
+        jnp.asarray(v, dtype=jnp.float32).ravel(),
+    ]).reshape(-1, 1)
+    p, _ = _cross_cov_nd_jax(
+        target_points, obs_points, corrlen, derivative_indices, bmo, nondivergent=False
+    )
+    return jnp.dot(p, jnp.linalg.solve(a, uv)).reshape(-1)
+
+
+def _single_component_vector_error_nd_numpy(target_points, obs_points, corrlen,
+                                            derivative_indices, err, b=0,
+                                            nondivergent=True):
+    """Dense N-D posterior error for streamfunction/velocity potential."""
+    theta, spatial_d2, total_d2, lambd = _vector_obs_geometry_numpy(
+        obs_points, corrlen, derivative_indices
+    )
+    n = len(obs_points)
+    bmo = b * err / lambd
+    a = _velocity_cov_block(
+        theta, spatial_d2, lambd, bmo, nondivergent=nondivergent
+    ) + err * np.eye(2 * n)
+    p, _ = _cross_cov_nd_numpy(
+        target_points, obs_points, corrlen, derivative_indices, bmo,
+        nondivergent=nondivergent,
+    )
+    proj = np.sum(p.T * np.linalg.solve(a, p.T), axis=0)
+    return np.clip(1.0 - (2.0 * lambd) * proj / (1.0 + bmo), 0.0, 1.0)
+
+
+def _single_component_vector_error_nd_jax(target_points, obs_points, corrlen,
+                                          derivative_indices, err, b=0,
+                                          nondivergent=True):
+    """Dense JAX N-D posterior error for streamfunction/velocity potential."""
+    import jax.numpy as jnp
+
+    theta, spatial_d2, total_d2, lambd = _vector_obs_geometry_jax(
+        obs_points, corrlen, derivative_indices
+    )
+    n = theta.shape[0]
+    bmo = b * err / lambd
+    a = _velocity_cov_block_jax(
+        theta, spatial_d2, lambd, bmo, nondivergent=nondivergent
+    ) + err * jnp.eye(2 * n, dtype=jnp.float32)
+    p, _ = _cross_cov_nd_jax(
+        target_points, obs_points, corrlen, derivative_indices, bmo,
+        nondivergent=nondivergent,
+    )
+    proj = jnp.sum(p.T * jnp.linalg.solve(a, p.T), axis=0)
+    return jnp.clip(1.0 - (2.0 * lambd) * proj / (1.0 + bmo), 0.0, 1.0)
+
+
+def _helmholtz_nd_numpy(target_points, obs_points, u, v, corrlen_psi, corrlen_chi,
+                        derivative_indices, err, b=0):
+    """Dense N-D Helmholtz recovery (numpy)."""
+    theta_psi, spatial_d2_psi, total_d2_psi, lambd_psi = _vector_obs_geometry_numpy(
+        obs_points, corrlen_psi, derivative_indices
+    )
+    theta_chi, spatial_d2_chi, total_d2_chi, lambd_chi = _vector_obs_geometry_numpy(
+        obs_points, corrlen_chi, derivative_indices
+    )
+    n = len(obs_points)
+    bmo_psi = b * err / lambd_psi
+    bmo_chi = b * err / lambd_chi
+    a = (
+        _velocity_cov_block(theta_psi, spatial_d2_psi, lambd_psi, bmo_psi, nondivergent=True)
+        + _velocity_cov_block(theta_chi, spatial_d2_chi, lambd_chi, bmo_chi, nondivergent=False)
+        + err * np.eye(2 * n)
+    )
+    uv = np.hstack((u, v)).reshape(-1, 1)
+    w = np.linalg.solve(a, uv)
+    p_psi, _ = _cross_cov_nd_numpy(
+        target_points, obs_points, corrlen_psi, derivative_indices, bmo_psi,
+        nondivergent=True,
+    )
+    p_chi, _ = _cross_cov_nd_numpy(
+        target_points, obs_points, corrlen_chi, derivative_indices, bmo_chi,
+        nondivergent=False,
+    )
+    return np.dot(p_psi, w).reshape(-1), np.dot(p_chi, w).reshape(-1)
+
+
+def _helmholtz_nd_jax(target_points, obs_points, u, v, corrlen_psi, corrlen_chi,
+                      derivative_indices, err, b=0):
+    """Dense N-D Helmholtz recovery (JAX)."""
+    import jax.numpy as jnp
+
+    theta_psi, spatial_d2_psi, total_d2_psi, lambd_psi = _vector_obs_geometry_jax(
+        obs_points, corrlen_psi, derivative_indices
+    )
+    theta_chi, spatial_d2_chi, total_d2_chi, lambd_chi = _vector_obs_geometry_jax(
+        obs_points, corrlen_chi, derivative_indices
+    )
+    n = theta_psi.shape[0]
+    bmo_psi = b * err / lambd_psi
+    bmo_chi = b * err / lambd_chi
+    a = (
+        _velocity_cov_block_jax(theta_psi, spatial_d2_psi, lambd_psi, bmo_psi, nondivergent=True)
+        + _velocity_cov_block_jax(theta_chi, spatial_d2_chi, lambd_chi, bmo_chi, nondivergent=False)
+        + err * jnp.eye(2 * n, dtype=jnp.float32)
+    )
+    uv = jnp.concatenate([
+        jnp.asarray(u, dtype=jnp.float32).ravel(),
+        jnp.asarray(v, dtype=jnp.float32).ravel(),
+    ]).reshape(-1, 1)
+    w = jnp.linalg.solve(a, uv)
+    p_psi, _ = _cross_cov_nd_jax(
+        target_points, obs_points, corrlen_psi, derivative_indices, bmo_psi,
+        nondivergent=True,
+    )
+    p_chi, _ = _cross_cov_nd_jax(
+        target_points, obs_points, corrlen_chi, derivative_indices, bmo_chi,
+        nondivergent=False,
+    )
+    return jnp.dot(p_psi, w).reshape(-1), jnp.dot(p_chi, w).reshape(-1)
+
+
+def _helmholtz_error_nd_numpy(target_points, obs_points, corrlen_psi, corrlen_chi,
+                              derivative_indices, err, b=0):
+    """Dense N-D Helmholtz posterior errors (numpy)."""
+    theta_psi, spatial_d2_psi, total_d2_psi, lambd_psi = _vector_obs_geometry_numpy(
+        obs_points, corrlen_psi, derivative_indices
+    )
+    theta_chi, spatial_d2_chi, total_d2_chi, lambd_chi = _vector_obs_geometry_numpy(
+        obs_points, corrlen_chi, derivative_indices
+    )
+    n = len(obs_points)
+    bmo_psi = b * err / lambd_psi
+    bmo_chi = b * err / lambd_chi
+    a = (
+        _velocity_cov_block(theta_psi, spatial_d2_psi, lambd_psi, bmo_psi, nondivergent=True)
+        + _velocity_cov_block(theta_chi, spatial_d2_chi, lambd_chi, bmo_chi, nondivergent=False)
+        + err * np.eye(2 * n)
+    )
+    p_psi, _ = _cross_cov_nd_numpy(
+        target_points, obs_points, corrlen_psi, derivative_indices, bmo_psi,
+        nondivergent=True,
+    )
+    p_chi, _ = _cross_cov_nd_numpy(
+        target_points, obs_points, corrlen_chi, derivative_indices, bmo_chi,
+        nondivergent=False,
+    )
+    psi_proj = np.sum(p_psi.T * np.linalg.solve(a, p_psi.T), axis=0)
+    chi_proj = np.sum(p_chi.T * np.linalg.solve(a, p_chi.T), axis=0)
+    return (
+        np.clip(1.0 - (2.0 * lambd_psi) * psi_proj / (1.0 + bmo_psi), 0.0, 1.0),
+        np.clip(1.0 - (2.0 * lambd_chi) * chi_proj / (1.0 + bmo_chi), 0.0, 1.0),
+    )
+
+
+def _helmholtz_error_nd_jax(target_points, obs_points, corrlen_psi, corrlen_chi,
+                            derivative_indices, err, b=0):
+    """Dense JAX N-D Helmholtz posterior errors."""
+    import jax.numpy as jnp
+
+    theta_psi, spatial_d2_psi, total_d2_psi, lambd_psi = _vector_obs_geometry_jax(
+        obs_points, corrlen_psi, derivative_indices
+    )
+    theta_chi, spatial_d2_chi, total_d2_chi, lambd_chi = _vector_obs_geometry_jax(
+        obs_points, corrlen_chi, derivative_indices
+    )
+    n = theta_psi.shape[0]
+    bmo_psi = b * err / lambd_psi
+    bmo_chi = b * err / lambd_chi
+    a = (
+        _velocity_cov_block_jax(theta_psi, spatial_d2_psi, lambd_psi, bmo_psi, nondivergent=True)
+        + _velocity_cov_block_jax(theta_chi, spatial_d2_chi, lambd_chi, bmo_chi, nondivergent=False)
+        + err * jnp.eye(2 * n, dtype=jnp.float32)
+    )
+    p_psi, _ = _cross_cov_nd_jax(
+        target_points, obs_points, corrlen_psi, derivative_indices, bmo_psi,
+        nondivergent=True,
+    )
+    p_chi, _ = _cross_cov_nd_jax(
+        target_points, obs_points, corrlen_chi, derivative_indices, bmo_chi,
+        nondivergent=False,
+    )
+    psi_proj = jnp.sum(p_psi.T * jnp.linalg.solve(a, p_psi.T), axis=0)
+    chi_proj = jnp.sum(p_chi.T * jnp.linalg.solve(a, p_chi.T), axis=0)
+    return (
+        jnp.clip(1.0 - (2.0 * lambd_psi) * psi_proj / (1.0 + bmo_psi), 0.0, 1.0),
+        jnp.clip(1.0 - (2.0 * lambd_chi) * chi_proj / (1.0 + bmo_chi), 0.0, 1.0),
+    )
 
 
 def error(xc, yc, x, y, corrlenx=None, corrleny=None, err=None,
@@ -869,10 +1353,10 @@ def streamfunction(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0, backend="nu
     A = _velocity_cov_block(t, d2, lambd, bmo) + err * np.eye(2 * n)
 
     # Target grid
-    nv1, nv2 = xc.shape
-    nv = nv1 * nv2
-    xc_flat = xc.T.ravel()
-    yc_flat = yc.T.ravel()
+    target_shape = xc.shape
+    nv = int(np.prod(target_shape))
+    xc_flat = xc.ravel()
+    yc_flat = yc.ravel()
 
     # Target-observation cross-covariance
     dx_c, dy_c, dc2 = _pairwise(xc_flat, yc_flat, x, y)
@@ -885,7 +1369,7 @@ def streamfunction(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0, backend="nu
     P[:, n : 2 * n] = -np.cos(tc) * np.sqrt(dc2) * Rc
 
     PSI = np.dot(P, np.linalg.solve(A, uv))
-    return PSI.reshape(nv2, nv1).T
+    return PSI.reshape(target_shape)
 
 
 def velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0, backend="numpy"):
@@ -973,10 +1457,10 @@ def velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0, backend
          + err * np.eye(2 * n))
 
     # Target grid
-    nv1, nv2 = xc.shape
-    nv = nv1 * nv2
-    xc_flat = xc.T.ravel()
-    yc_flat = yc.T.ravel()
+    target_shape = xc.shape
+    nv = int(np.prod(target_shape))
+    xc_flat = xc.ravel()
+    yc_flat = yc.ravel()
 
     # Target-observation cross-covariance
     dx_c, dy_c, dc2 = _pairwise(xc_flat, yc_flat, x, y)
@@ -989,7 +1473,7 @@ def velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0, backend
     P[:, n : 2 * n] = -np.sin(tc) * np.sqrt(dc2) * Rc
 
     CHI = np.dot(P, np.linalg.solve(A, uv))
-    return CHI.reshape(nv2, nv1).T
+    return CHI.reshape(target_shape)
 
 
 def streamfunction_error(xc, yc, x, y, u, v, corrlenx, corrleny, err,
@@ -1018,10 +1502,10 @@ def streamfunction_error(xc, yc, x, y, u, v, corrlenx, corrleny, err,
     bmo = b * err / lambd
     A = _velocity_cov_block(t, d2, lambd, bmo, nondivergent=True) + err * np.eye(2 * n)
 
-    nv1, nv2 = xc.shape
-    nv = nv1 * nv2
-    xc_flat = xc.T.ravel()
-    yc_flat = yc.T.ravel()
+    target_shape = xc.shape
+    nv = int(np.prod(target_shape))
+    xc_flat = xc.ravel()
+    yc_flat = yc.ravel()
     dx_c, dy_c, dc2 = _pairwise(xc_flat, yc_flat, x, y)
     tc = np.arctan2(dy_c, dx_c)
     Rc = np.exp(-lambd * dc2) + bmo
@@ -1031,7 +1515,7 @@ def streamfunction_error(xc, yc, x, y, u, v, corrlenx, corrleny, err,
     P[:, n : 2 * n] = -np.cos(tc) * np.sqrt(dc2) * Rc
 
     proj = np.sum(P.T * np.linalg.solve(A, P.T), axis=0)
-    return np.clip(1.0 - (2.0 * lambd) * proj / (1.0 + bmo), 0.0, 1.0).reshape(nv2, nv1).T
+    return np.clip(1.0 - (2.0 * lambd) * proj / (1.0 + bmo), 0.0, 1.0).reshape(target_shape)
 
 
 def velocity_potential_error(xc, yc, x, y, u, v, corrlenx, corrleny, err,
@@ -1060,10 +1544,10 @@ def velocity_potential_error(xc, yc, x, y, u, v, corrlenx, corrleny, err,
     bmo = b * err / lambd
     A = _velocity_cov_block(t, d2, lambd, bmo, nondivergent=False) + err * np.eye(2 * n)
 
-    nv1, nv2 = xc.shape
-    nv = nv1 * nv2
-    xc_flat = xc.T.ravel()
-    yc_flat = yc.T.ravel()
+    target_shape = xc.shape
+    nv = int(np.prod(target_shape))
+    xc_flat = xc.ravel()
+    yc_flat = yc.ravel()
     dx_c, dy_c, dc2 = _pairwise(xc_flat, yc_flat, x, y)
     tc = np.arctan2(dy_c, dx_c)
     Rc = np.exp(-lambd * dc2) + bmo
@@ -1073,7 +1557,7 @@ def velocity_potential_error(xc, yc, x, y, u, v, corrlenx, corrleny, err,
     P[:, n : 2 * n] = -np.sin(tc) * np.sqrt(dc2) * Rc
 
     proj = np.sum(P.T * np.linalg.solve(A, P.T), axis=0)
-    return np.clip(1.0 - (2.0 * lambd) * proj / (1.0 + bmo), 0.0, 1.0).reshape(nv2, nv1).T
+    return np.clip(1.0 - (2.0 * lambd) * proj / (1.0 + bmo), 0.0, 1.0).reshape(target_shape)
 
 
 def helmholtz_error(xc, yc, x, y, u, v,
@@ -1120,11 +1604,11 @@ def helmholtz_error(xc, yc, x, y, u, v,
         + err * np.eye(2 * n)
     )
 
-    nv1, nv2 = xc.shape
-    nv = nv1 * nv2
-    yc_flat = yc.T.ravel()
+    target_shape = xc.shape
+    nv = int(np.prod(target_shape))
+    yc_flat = yc.ravel()
 
-    xc_psi_flat = xc_psi.T.ravel()
+    xc_psi_flat = xc_psi.ravel()
     dx_c, dy_c, dc2 = _pairwise(xc_psi_flat, yc_flat, x_psi, y)
     tc = np.arctan2(dy_c, dx_c)
     Rc = np.exp(-lambd_psi * dc2) + bmo_psi
@@ -1132,7 +1616,7 @@ def helmholtz_error(xc, yc, x, y, u, v,
     P_psi[:, 0:n] = np.sin(tc) * np.sqrt(dc2) * Rc
     P_psi[:, n : 2 * n] = -np.cos(tc) * np.sqrt(dc2) * Rc
 
-    xc_chi_flat = xc_chi.T.ravel()
+    xc_chi_flat = xc_chi.ravel()
     dx_c, dy_c, dc2 = _pairwise(xc_chi_flat, yc_flat, x_chi, y)
     tc = np.arctan2(dy_c, dx_c)
     Rc = np.exp(-lambd_chi * dc2) + bmo_chi
@@ -1144,10 +1628,10 @@ def helmholtz_error(xc, yc, x, y, u, v,
     chi_proj = np.sum(P_chi.T * np.linalg.solve(A, P_chi.T), axis=0)
     psi_error = np.clip(
         1.0 - (2.0 * lambd_psi) * psi_proj / (1.0 + bmo_psi), 0.0, 1.0
-    ).reshape(nv2, nv1).T
+    ).reshape(target_shape)
     chi_error = np.clip(
         1.0 - (2.0 * lambd_chi) * chi_proj / (1.0 + bmo_chi), 0.0, 1.0
-    ).reshape(nv2, nv1).T
+    ).reshape(target_shape)
     return psi_error, chi_error
 
 
@@ -1262,12 +1746,12 @@ def helmholtz(xc, yc, x, y, u, v,
     w = np.linalg.solve(A, uv)
 
     # Target grid
-    nv1, nv2 = xc.shape
-    nv = nv1 * nv2
-    yc_flat = yc.T.ravel()
+    target_shape = xc.shape
+    nv = int(np.prod(target_shape))
+    yc_flat = yc.ravel()
 
     # Psi cross-covariance
-    xc_psi_flat = xc_psi.T.ravel()
+    xc_psi_flat = xc_psi.ravel()
     dx_c, dy_c, dc2 = _pairwise(xc_psi_flat, yc_flat, x_psi, y)
     tc = np.arctan2(dy_c, dx_c)
     Rc = np.exp(-lambd_psi * dc2) + bmo_psi
@@ -1277,7 +1761,7 @@ def helmholtz(xc, yc, x, y, u, v,
     P_psi[:, n : 2 * n] = -np.cos(tc) * np.sqrt(dc2) * Rc
 
     # Chi cross-covariance
-    xc_chi_flat = xc_chi.T.ravel()
+    xc_chi_flat = xc_chi.ravel()
     dx_c, dy_c, dc2 = _pairwise(xc_chi_flat, yc_flat, x_chi, y)
     tc = np.arctan2(dy_c, dx_c)
     Rc = np.exp(-lambd_chi * dc2) + bmo_chi
@@ -1286,7 +1770,7 @@ def helmholtz(xc, yc, x, y, u, v,
     P_chi[:, 0:n] = -np.cos(tc) * np.sqrt(dc2) * Rc
     P_chi[:, n : 2 * n] = -np.sin(tc) * np.sqrt(dc2) * Rc
 
-    PSI = np.dot(P_psi, w).reshape(nv2, nv1).T
-    CHI = np.dot(P_chi, w).reshape(nv2, nv1).T
+    PSI = np.dot(P_psi, w).reshape(target_shape)
+    CHI = np.dot(P_chi, w).reshape(target_shape)
 
     return PSI, CHI
