@@ -7,7 +7,7 @@ streamfunction recovery, velocity potential recovery, and Helmholtz
 decomposition.
 """
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 from .interp import (
     error,
