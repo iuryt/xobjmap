@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from xobjmap import velocity_potential
+from xobjmap import velocity_potential, velocity_potential_error
 
 
 def test_velocity_potential_returns_correct_shape(backend):
@@ -73,3 +73,24 @@ def test_velocity_potential_recovers_source(backend):
     nrmse_v = np.sqrt(np.mean((v_recon - v_true)**2)) / np.sqrt(np.mean(v_true**2))
     assert nrmse_u < 0.3, f"u nRMSE = {nrmse_u:.3f}"
     assert nrmse_v < 0.3, f"v nRMSE = {nrmse_v:.3f}"
+
+
+def test_velocity_potential_error_returns_bounded_field(backend):
+    """velocity_potential_error should return bounded values on the target grid."""
+    gx, gy = np.meshgrid(np.linspace(-4, 4, 9), np.linspace(-4, 4, 7))
+
+    rng = np.random.default_rng(42)
+    x = rng.uniform(-3, 3, 25)
+    y = rng.uniform(-3, 3, 25)
+    u = rng.standard_normal(25)
+    v = rng.standard_normal(25)
+
+    chi_error = velocity_potential_error(
+        gx, gy, x, y, u, v,
+        corrlenx=2.5, corrleny=2.5,
+        err=0.1, backend=backend,
+    )
+
+    assert chi_error.shape == gx.shape
+    assert np.all(chi_error >= 0)
+    assert np.all(chi_error <= 1)

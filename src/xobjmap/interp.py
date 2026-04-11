@@ -230,6 +230,170 @@ def _velocity_matvec_jax(x, y, n, err, lambd, bmo, nondivergent, chunk=512):
     return matvec
 
 
+def _single_component_velocity_error_jax(xc, yc, x, y, corrlenx, corrleny, err, b,
+                                         nondivergent, k_local=None):
+    """Local posterior error for streamfunction or velocity potential."""
+    import jax
+    import jax.numpy as jnp
+
+    corrlen = float(corrleny)
+    ratio = corrleny / corrlenx
+    x = jnp.asarray(x, dtype=jnp.float32) * ratio
+    xc = jnp.asarray(xc, dtype=jnp.float32) * ratio
+    y = jnp.asarray(y, dtype=jnp.float32)
+    yc = jnp.asarray(yc, dtype=jnp.float32)
+    target_shape = xc.shape
+    xc = xc.ravel()
+    yc = yc.ravel()
+
+    n = x.shape[0]
+    lambd = 1.0 / corrlen**2
+    bmo = b * err / lambd
+    var0 = 1.0 + bmo
+    k = min(n, k_local if k_local is not None else min(n, 100))
+
+    @jax.jit
+    def _local_error(args):
+        xc_j, yc_j = args
+        d2_all = (xc_j - x) ** 2 + (yc_j - y) ** 2
+        _, idx = jax.lax.top_k(-d2_all, k)
+        x_k = x[idx]
+        y_k = y[idx]
+        dx_k = x_k[:, None] - x_k[None, :]
+        dy_k = y_k[:, None] - y_k[None, :]
+        d2_k = dx_k ** 2 + dy_k ** 2
+        t_k = jnp.arctan2(dy_k, dx_k)
+        A_k = _velocity_cov_block_jax(
+            t_k, d2_k, lambd, bmo, nondivergent=nondivergent
+        ) + err * jnp.eye(2 * k, dtype=jnp.float32)
+
+        dx_c = x_k - xc_j
+        dy_c = y_k - yc_j
+        dc2 = dx_c ** 2 + dy_c ** 2
+        tc = jnp.arctan2(dy_c, dx_c)
+        Rc = jnp.exp(-lambd * dc2) + bmo
+        sqrt_dc2 = jnp.sqrt(dc2)
+        if nondivergent:
+            p = jnp.concatenate([
+                jnp.sin(tc) * sqrt_dc2 * Rc,
+                -jnp.cos(tc) * sqrt_dc2 * Rc,
+            ])
+        else:
+            p = jnp.concatenate([
+                -jnp.cos(tc) * sqrt_dc2 * Rc,
+                -jnp.sin(tc) * sqrt_dc2 * Rc,
+            ])
+        err_local = 1.0 - (2.0 * lambd) * jnp.dot(p, jnp.linalg.solve(A_k, p)) / var0
+        return jnp.clip(err_local, 0.0, 1.0)
+
+    return jax.lax.map(_local_error, (xc, yc)).reshape(target_shape)
+
+
+def _streamfunction_error_jax(xc, yc, x, y, corrlenx, corrleny, err, b=0,
+                              k_local=None):
+    return _single_component_velocity_error_jax(
+        xc, yc, x, y, corrlenx, corrleny, err, b,
+        nondivergent=True, k_local=k_local,
+    )
+
+
+def _velocity_potential_error_jax(xc, yc, x, y, corrlenx, corrleny, err, b=0,
+                                  k_local=None):
+    return _single_component_velocity_error_jax(
+        xc, yc, x, y, corrlenx, corrleny, err, b,
+        nondivergent=False, k_local=k_local,
+    )
+
+
+def _helmholtz_error_jax(xc, yc, x, y,
+                         corrlenx_psi, corrleny_psi,
+                         corrlenx_chi, corrleny_chi,
+                         err, b=0, k_local=None):
+    """Local posterior errors for Helmholtz recovery."""
+    import jax
+    import jax.numpy as jnp
+
+    x = jnp.asarray(x, dtype=jnp.float32)
+    y = jnp.asarray(y, dtype=jnp.float32)
+    xc = jnp.asarray(xc, dtype=jnp.float32)
+    yc = jnp.asarray(yc, dtype=jnp.float32)
+
+    x_psi = x * (corrleny_psi / corrlenx_psi)
+    xc_psi = xc * (corrleny_psi / corrlenx_psi)
+    lambd_psi = 1.0 / float(corrleny_psi) ** 2
+    bmo_psi = b * err / lambd_psi
+
+    x_chi = x * (corrleny_chi / corrlenx_chi)
+    xc_chi = xc * (corrleny_chi / corrlenx_chi)
+    lambd_chi = 1.0 / float(corrleny_chi) ** 2
+    bmo_chi = b * err / lambd_chi
+
+    var0_psi = 1.0 + bmo_psi
+    var0_chi = 1.0 + bmo_chi
+    n = x.shape[0]
+    k = min(n, k_local if k_local is not None else min(n, 100))
+
+    @jax.jit
+    def _local_error(args):
+        xc_j, xc_psi_j, xc_chi_j, yc_j = args
+        d2_all = (xc_j - x) ** 2 + (yc_j - y) ** 2
+        _, idx = jax.lax.top_k(-d2_all, k)
+
+        x_psi_k = x_psi[idx]
+        x_chi_k = x_chi[idx]
+        y_k = y[idx]
+
+        dx_psi_k = x_psi_k[:, None] - x_psi_k[None, :]
+        dy_k = y_k[:, None] - y_k[None, :]
+        d2_psi_k = dx_psi_k ** 2 + dy_k ** 2
+        t_psi_k = jnp.arctan2(dy_k, dx_psi_k)
+
+        dx_chi_k = x_chi_k[:, None] - x_chi_k[None, :]
+        d2_chi_k = dx_chi_k ** 2 + dy_k ** 2
+        t_chi_k = jnp.arctan2(dy_k, dx_chi_k)
+
+        A_k = (
+            _velocity_cov_block_jax(
+                t_psi_k, d2_psi_k, lambd_psi, bmo_psi, nondivergent=True
+            )
+            + _velocity_cov_block_jax(
+                t_chi_k, d2_chi_k, lambd_chi, bmo_chi, nondivergent=False
+            )
+            + err * jnp.eye(2 * k, dtype=jnp.float32)
+        )
+
+        dx_c_psi = x_psi_k - xc_psi_j
+        dy_c = y_k - yc_j
+        dc2_psi = dx_c_psi ** 2 + dy_c ** 2
+        tc_psi = jnp.arctan2(dy_c, dx_c_psi)
+        Rc_psi = jnp.exp(-lambd_psi * dc2_psi) + bmo_psi
+        sqrt_dc2_psi = jnp.sqrt(dc2_psi)
+        p_psi = jnp.concatenate([
+            jnp.sin(tc_psi) * sqrt_dc2_psi * Rc_psi,
+            -jnp.cos(tc_psi) * sqrt_dc2_psi * Rc_psi,
+        ])
+
+        dx_c_chi = x_chi_k - xc_chi_j
+        dc2_chi = dx_c_chi ** 2 + dy_c ** 2
+        tc_chi = jnp.arctan2(dy_c, dx_c_chi)
+        Rc_chi = jnp.exp(-lambd_chi * dc2_chi) + bmo_chi
+        sqrt_dc2_chi = jnp.sqrt(dc2_chi)
+        p_chi = jnp.concatenate([
+            -jnp.cos(tc_chi) * sqrt_dc2_chi * Rc_chi,
+            -jnp.sin(tc_chi) * sqrt_dc2_chi * Rc_chi,
+        ])
+
+        psi_err = 1.0 - (2.0 * lambd_psi) * jnp.dot(p_psi, jnp.linalg.solve(A_k, p_psi)) / var0_psi
+        chi_err = 1.0 - (2.0 * lambd_chi) * jnp.dot(p_chi, jnp.linalg.solve(A_k, p_chi)) / var0_chi
+        return jnp.clip(psi_err, 0.0, 1.0), jnp.clip(chi_err, 0.0, 1.0)
+
+    psi_err, chi_err = jax.lax.map(
+        _local_error, (xc.T.ravel(), xc_psi.T.ravel(), xc_chi.T.ravel(), yc.T.ravel())
+    )
+    nv1, nv2 = xc.shape
+    return psi_err.reshape(nv2, nv1).T, chi_err.reshape(nv2, nv1).T
+
+
 def _streamfunction_jax(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0):
     """Streamfunction recovery via matrix-free CG (JAX)."""
     import jax
@@ -388,6 +552,7 @@ def _helmholtz_jax(xc, yc, x, y, u, v,
     nv1, nv2 = xc_psi.shape
     xc_psi_flat = xc_psi.T.ravel()
     xc_chi_flat = xc_chi.T.ravel()
+    xc_flat = jnp.asarray(xc, dtype=jnp.float32).T.ravel()
     yc_flat = yc_arr.T.ravel()
 
     @jax.jit
@@ -419,7 +584,10 @@ def _helmholtz_jax(xc, yc, x, y, u, v,
         return psi, chi
 
     psi, chi = _psi_chi_vec(w_u, w_v)
-    return psi.reshape(nv2, nv1).T, chi.reshape(nv2, nv1).T
+    psi = psi.reshape(nv2, nv1).T
+    chi = chi.reshape(nv2, nv1).T
+
+    return psi, chi
 
 
 def _velocity_cov_block(t, d2, lambd, bmo, nondivergent=True):
@@ -461,6 +629,27 @@ def _velocity_cov_block(t, d2, lambd, bmo, nondivergent=True):
     A[0:n, n : 2 * n] = np.cos(t) * np.sin(t) * (R - S)
     A[n : 2 * n, 0:n] = A[0:n, n : 2 * n]
     A[n : 2 * n, n : 2 * n] = (np.sin(t) ** 2) * (R - S) + S
+    return A
+
+
+def _velocity_cov_block_jax(t, d2, lambd, bmo, nondivergent=True):
+    """JAX version of `_velocity_cov_block`."""
+    import jax.numpy as jnp
+
+    n = t.shape[0]
+    E = jnp.exp(-lambd * d2)
+    if nondivergent:
+        R = E + bmo
+        S = E * (1 - 2 * lambd * d2) + bmo
+    else:
+        R = E * (1 - 2 * lambd * d2) + bmo
+        S = E + bmo
+
+    A = jnp.zeros((2 * n, 2 * n), dtype=t.dtype)
+    A = A.at[0:n, 0:n].set((jnp.cos(t) ** 2) * (R - S) + S)
+    A = A.at[0:n, n : 2 * n].set(jnp.cos(t) * jnp.sin(t) * (R - S))
+    A = A.at[n : 2 * n, 0:n].set(A[0:n, n : 2 * n])
+    A = A.at[n : 2 * n, n : 2 * n].set((jnp.sin(t) ** 2) * (R - S) + S)
     return A
 
 
@@ -521,6 +710,15 @@ def error(xc, yc, x, y, corrlenx=None, corrleny=None, err=None,
         return _error_jax(xc, yc, x, y, corrlenx, corrleny, err, k_local=k_local)
     else:
         raise ValueError(f"Unknown backend {backend!r}. Choose 'numpy' or 'jax'.")
+
+
+def scalar_error(xc, yc, x, y, corrlenx=None, corrleny=None, err=None,
+                 backend="numpy", k_local=None):
+    """Alias for :func:`error` for API consistency with vector methods."""
+    return error(
+        xc, yc, x, y, corrlenx=corrlenx, corrleny=corrleny, err=err,
+        backend=backend, k_local=k_local,
+    )
 
 
 def scalar(xc, yc, x, y, t, corrlenx=None, corrleny=None, err=None, backend="numpy"):
@@ -794,6 +992,165 @@ def velocity_potential(xc, yc, x, y, u, v, corrlenx, corrleny, err, b=0, backend
     return CHI.reshape(nv2, nv1).T
 
 
+def streamfunction_error(xc, yc, x, y, u, v, corrlenx, corrleny, err,
+                         b=0, backend="numpy", k_local=None):
+    """Normalized posterior error for streamfunction recovery."""
+    if backend == "jax":
+        return _streamfunction_error_jax(
+            xc, yc, x, y, corrlenx, corrleny, err, b=b, k_local=k_local
+        )
+    elif backend != "numpy":
+        raise ValueError(f"Unknown backend {backend!r}. Choose 'numpy' or 'jax'.")
+
+    xc = np.asarray(xc)
+    yc = np.asarray(yc)
+    x = np.asarray(x)
+    y = np.asarray(y)
+
+    corrlen = corrleny
+    xc = xc * (corrleny / corrlenx)
+    x = x * (corrleny / corrlenx)
+
+    n = len(x)
+    dx, dy, d2 = _pairwise(x, y, x, y)
+    t = np.arctan2(dy, dx)
+    lambd = 1 / corrlen**2
+    bmo = b * err / lambd
+    A = _velocity_cov_block(t, d2, lambd, bmo, nondivergent=True) + err * np.eye(2 * n)
+
+    nv1, nv2 = xc.shape
+    nv = nv1 * nv2
+    xc_flat = xc.T.ravel()
+    yc_flat = yc.T.ravel()
+    dx_c, dy_c, dc2 = _pairwise(xc_flat, yc_flat, x, y)
+    tc = np.arctan2(dy_c, dx_c)
+    Rc = np.exp(-lambd * dc2) + bmo
+
+    P = np.zeros((nv, 2 * n))
+    P[:, 0:n] = np.sin(tc) * np.sqrt(dc2) * Rc
+    P[:, n : 2 * n] = -np.cos(tc) * np.sqrt(dc2) * Rc
+
+    proj = np.sum(P.T * np.linalg.solve(A, P.T), axis=0)
+    return np.clip(1.0 - (2.0 * lambd) * proj / (1.0 + bmo), 0.0, 1.0).reshape(nv2, nv1).T
+
+
+def velocity_potential_error(xc, yc, x, y, u, v, corrlenx, corrleny, err,
+                             b=0, backend="numpy", k_local=None):
+    """Normalized posterior error for velocity-potential recovery."""
+    if backend == "jax":
+        return _velocity_potential_error_jax(
+            xc, yc, x, y, corrlenx, corrleny, err, b=b, k_local=k_local
+        )
+    elif backend != "numpy":
+        raise ValueError(f"Unknown backend {backend!r}. Choose 'numpy' or 'jax'.")
+
+    xc = np.asarray(xc)
+    yc = np.asarray(yc)
+    x = np.asarray(x)
+    y = np.asarray(y)
+
+    corrlen = corrleny
+    xc = xc * (corrleny / corrlenx)
+    x = x * (corrleny / corrlenx)
+
+    n = len(x)
+    dx, dy, d2 = _pairwise(x, y, x, y)
+    t = np.arctan2(dy, dx)
+    lambd = 1 / corrlen**2
+    bmo = b * err / lambd
+    A = _velocity_cov_block(t, d2, lambd, bmo, nondivergent=False) + err * np.eye(2 * n)
+
+    nv1, nv2 = xc.shape
+    nv = nv1 * nv2
+    xc_flat = xc.T.ravel()
+    yc_flat = yc.T.ravel()
+    dx_c, dy_c, dc2 = _pairwise(xc_flat, yc_flat, x, y)
+    tc = np.arctan2(dy_c, dx_c)
+    Rc = np.exp(-lambd * dc2) + bmo
+
+    P = np.zeros((nv, 2 * n))
+    P[:, 0:n] = -np.cos(tc) * np.sqrt(dc2) * Rc
+    P[:, n : 2 * n] = -np.sin(tc) * np.sqrt(dc2) * Rc
+
+    proj = np.sum(P.T * np.linalg.solve(A, P.T), axis=0)
+    return np.clip(1.0 - (2.0 * lambd) * proj / (1.0 + bmo), 0.0, 1.0).reshape(nv2, nv1).T
+
+
+def helmholtz_error(xc, yc, x, y, u, v,
+                    corrlenx_psi, corrleny_psi,
+                    corrlenx_chi, corrleny_chi,
+                    err, b=0, backend="numpy", k_local=None):
+    """Normalized posterior errors for Helmholtz streamfunction and chi."""
+    if backend == "jax":
+        return _helmholtz_error_jax(
+            xc, yc, x, y,
+            corrlenx_psi, corrleny_psi,
+            corrlenx_chi, corrleny_chi,
+            err, b=b, k_local=k_local,
+        )
+    elif backend != "numpy":
+        raise ValueError(f"Unknown backend {backend!r}. Choose 'numpy' or 'jax'.")
+
+    xc = np.asarray(xc)
+    yc = np.asarray(yc)
+    x = np.asarray(x)
+    y = np.asarray(y)
+
+    n = len(x)
+    corrlen_psi = corrleny_psi
+    x_psi = x * (corrleny_psi / corrlenx_psi)
+    xc_psi = xc * (corrleny_psi / corrlenx_psi)
+    corrlen_chi = corrleny_chi
+    x_chi = x * (corrleny_chi / corrlenx_chi)
+    xc_chi = xc * (corrleny_chi / corrlenx_chi)
+
+    dx_psi, dy, d2_psi = _pairwise(x_psi, y, x_psi, y)
+    t_psi = np.arctan2(dy, dx_psi)
+    lambd_psi = 1 / corrlen_psi**2
+    bmo_psi = b * err / lambd_psi
+
+    dx_chi, _, d2_chi = _pairwise(x_chi, y, x_chi, y)
+    t_chi = np.arctan2(dy, dx_chi)
+    lambd_chi = 1 / corrlen_chi**2
+    bmo_chi = b * err / lambd_chi
+
+    A = (
+        _velocity_cov_block(t_psi, d2_psi, lambd_psi, bmo_psi, nondivergent=True)
+        + _velocity_cov_block(t_chi, d2_chi, lambd_chi, bmo_chi, nondivergent=False)
+        + err * np.eye(2 * n)
+    )
+
+    nv1, nv2 = xc.shape
+    nv = nv1 * nv2
+    yc_flat = yc.T.ravel()
+
+    xc_psi_flat = xc_psi.T.ravel()
+    dx_c, dy_c, dc2 = _pairwise(xc_psi_flat, yc_flat, x_psi, y)
+    tc = np.arctan2(dy_c, dx_c)
+    Rc = np.exp(-lambd_psi * dc2) + bmo_psi
+    P_psi = np.zeros((nv, 2 * n))
+    P_psi[:, 0:n] = np.sin(tc) * np.sqrt(dc2) * Rc
+    P_psi[:, n : 2 * n] = -np.cos(tc) * np.sqrt(dc2) * Rc
+
+    xc_chi_flat = xc_chi.T.ravel()
+    dx_c, dy_c, dc2 = _pairwise(xc_chi_flat, yc_flat, x_chi, y)
+    tc = np.arctan2(dy_c, dx_c)
+    Rc = np.exp(-lambd_chi * dc2) + bmo_chi
+    P_chi = np.zeros((nv, 2 * n))
+    P_chi[:, 0:n] = -np.cos(tc) * np.sqrt(dc2) * Rc
+    P_chi[:, n : 2 * n] = -np.sin(tc) * np.sqrt(dc2) * Rc
+
+    psi_proj = np.sum(P_psi.T * np.linalg.solve(A, P_psi.T), axis=0)
+    chi_proj = np.sum(P_chi.T * np.linalg.solve(A, P_chi.T), axis=0)
+    psi_error = np.clip(
+        1.0 - (2.0 * lambd_psi) * psi_proj / (1.0 + bmo_psi), 0.0, 1.0
+    ).reshape(nv2, nv1).T
+    chi_error = np.clip(
+        1.0 - (2.0 * lambd_chi) * chi_proj / (1.0 + bmo_chi), 0.0, 1.0
+    ).reshape(nv2, nv1).T
+    return psi_error, chi_error
+
+
 def helmholtz(xc, yc, x, y, u, v,
               corrlenx_psi, corrleny_psi,
               corrlenx_chi, corrleny_chi,
@@ -837,7 +1194,6 @@ def helmholtz(xc, yc, x, y, u, v,
         Normalized random error variance (0 < err < 1).
     b : float, optional
         Mean correction parameter. Default is 0 (no correction).
-
     Returns
     -------
     psi : numpy.ndarray

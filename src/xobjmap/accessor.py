@@ -9,10 +9,14 @@ import numpy as np
 import xarray as xr
 
 from .interp import error as _error
+from .interp import scalar_error as _scalar_error
 from .interp import scalar as _scalar
 from .interp import streamfunction as _streamfunction
+from .interp import streamfunction_error as _streamfunction_error
 from .interp import velocity_potential as _velocity_potential
+from .interp import velocity_potential_error as _velocity_potential_error
 from .interp import helmholtz as _helmholtz
+from .interp import helmholtz_error as _helmholtz_error
 
 
 def _parse_corrlen(corrlen, coord_names):
@@ -120,7 +124,7 @@ class XobjmapAccessor:
     def __init__(self, ds):
         self._ds = ds
 
-    def scalar(self, var, target, corrlen, err, backend="numpy"):
+    def scalar(self, var, target, corrlen, err, backend="numpy", return_error=True):
         """
         Scalar objective analysis of a variable onto target locations.
 
@@ -174,21 +178,36 @@ class XobjmapAccessor:
             corrlenx=corrlenx, corrleny=corrleny, err=err,
             backend=backend,
         )
-        ep = _error(
+        tp = np.asarray(tp).reshape(Xg.shape)
+        data_vars = {var: (dims, tp)}
+        if return_error:
+            ep = _scalar_error(
+                Xg.ravel(), Yg.ravel(), x_obs, y_obs,
+                corrlenx=corrlenx, corrleny=corrleny, err=err,
+                backend=backend,
+            )
+            data_vars["error"] = (dims, np.asarray(ep).reshape(Xg.shape))
+
+        return xr.Dataset(data_vars, coords=coords)
+
+    def scalar_error(self, target, corrlen, err, backend="numpy"):
+        """Return only scalar interpolation error for the target grid."""
+        ds = self._ds
+        coord_names = _find_coord_names(ds, target)
+        corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
+        cx, cy = coord_names
+        x_obs = ds[cx].values
+        y_obs = ds[cy].values
+        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
+        ep = _scalar_error(
             Xg.ravel(), Yg.ravel(), x_obs, y_obs,
             corrlenx=corrlenx, corrleny=corrleny, err=err,
             backend=backend,
         )
+        return xr.Dataset({"error": (dims, np.asarray(ep).reshape(Xg.shape))}, coords=coords)
 
-        tp = np.asarray(tp).reshape(Xg.shape)
-        ep = np.asarray(ep).reshape(Xg.shape)
-
-        return xr.Dataset(
-            {var: (dims, tp), "error": (dims, ep)},
-            coords=coords,
-        )
-
-    def streamfunction(self, u_var, v_var, target, corrlen, err, b=0, backend="numpy"):
+    def streamfunction(self, u_var, v_var, target, corrlen, err, b=0,
+                       backend="numpy", return_error=True):
         """
         Recover the streamfunction from scattered velocity observations.
 
@@ -239,12 +258,37 @@ class XobjmapAccessor:
             backend=backend,
         )
 
-        return xr.Dataset(
-            {"psi": (dims, psi)},
-            coords=coords,
-        )
+        data_vars = {"psi": (dims, psi)}
+        if return_error:
+            psi_error = _streamfunction_error(
+                Xg, Yg, x_obs, y_obs, u_obs, v_obs,
+                corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
+                backend=backend,
+            )
+            data_vars["psi_error"] = (dims, np.asarray(psi_error))
 
-    def velocity_potential(self, u_var, v_var, target, corrlen, err, b=0, backend="numpy"):
+        return xr.Dataset(data_vars, coords=coords)
+
+    def streamfunction_error(self, u_var, v_var, target, corrlen, err, b=0, backend="numpy"):
+        """Return only streamfunction posterior error for the target grid."""
+        ds = self._ds
+        coord_names = _find_coord_names(ds, target)
+        corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
+        cx, cy = coord_names
+        x_obs = ds[cx].values
+        y_obs = ds[cy].values
+        u_obs = ds[u_var].values
+        v_obs = ds[v_var].values
+        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
+        psi_error = _streamfunction_error(
+            Xg, Yg, x_obs, y_obs, u_obs, v_obs,
+            corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
+            backend=backend,
+        )
+        return xr.Dataset({"psi_error": (dims, np.asarray(psi_error))}, coords=coords)
+
+    def velocity_potential(self, u_var, v_var, target, corrlen, err, b=0,
+                           backend="numpy", return_error=True):
         """
         Recover the velocity potential from scattered velocity observations.
 
@@ -295,13 +339,38 @@ class XobjmapAccessor:
             backend=backend,
         )
 
-        return xr.Dataset(
-            {"chi": (dims, chi)},
-            coords=coords,
+        data_vars = {"chi": (dims, chi)}
+        if return_error:
+            chi_error = _velocity_potential_error(
+                Xg, Yg, x_obs, y_obs, u_obs, v_obs,
+                corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
+                backend=backend,
+            )
+            data_vars["chi_error"] = (dims, np.asarray(chi_error))
+
+        return xr.Dataset(data_vars, coords=coords)
+
+    def velocity_potential_error(self, u_var, v_var, target, corrlen, err, b=0,
+                                 backend="numpy"):
+        """Return only velocity-potential posterior error for the target grid."""
+        ds = self._ds
+        coord_names = _find_coord_names(ds, target)
+        corrlenx, corrleny = _parse_corrlen(corrlen, coord_names)
+        cx, cy = coord_names
+        x_obs = ds[cx].values
+        y_obs = ds[cy].values
+        u_obs = ds[u_var].values
+        v_obs = ds[v_var].values
+        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
+        chi_error = _velocity_potential_error(
+            Xg, Yg, x_obs, y_obs, u_obs, v_obs,
+            corrlenx=corrlenx, corrleny=corrleny, err=err, b=b,
+            backend=backend,
         )
+        return xr.Dataset({"chi_error": (dims, np.asarray(chi_error))}, coords=coords)
 
     def helmholtz(self, u_var, v_var, target, corrlen_psi, corrlen_chi,
-                  err, b=0, backend="numpy"):
+                  err, b=0, backend="numpy", return_error=True):
         """
         Helmholtz decomposition: recover streamfunction and velocity
         potential from scattered velocity observations.
@@ -327,7 +396,8 @@ class XobjmapAccessor:
         -------
         xr.Dataset
             Dataset on the target grid with variables ``psi``
-            (streamfunction) and ``chi`` (velocity potential).
+            (streamfunction), ``chi`` (velocity potential),
+            ``psi_error`` and ``chi_error`` (normalized posterior errors).
 
         Notes
         -----
@@ -356,7 +426,42 @@ class XobjmapAccessor:
             err=err, b=b, backend=backend,
         )
 
+        data_vars = {"psi": (dims, psi), "chi": (dims, chi)}
+        if return_error:
+            psi_error, chi_error = _helmholtz_error(
+                Xg, Yg, x_obs, y_obs, u_obs, v_obs,
+                corrlenx_psi=corrlenx_psi, corrleny_psi=corrleny_psi,
+                corrlenx_chi=corrlenx_chi, corrleny_chi=corrleny_chi,
+                err=err, b=b, backend=backend,
+            )
+            data_vars["psi_error"] = (dims, np.asarray(psi_error))
+            data_vars["chi_error"] = (dims, np.asarray(chi_error))
+
+        return xr.Dataset(data_vars, coords=coords)
+
+    def helmholtz_error(self, u_var, v_var, target, corrlen_psi, corrlen_chi,
+                        err, b=0, backend="numpy"):
+        """Return only Helmholtz posterior errors for the target grid."""
+        ds = self._ds
+        coord_names = _find_coord_names(ds, target)
+        corrlenx_psi, corrleny_psi = _parse_corrlen(corrlen_psi, coord_names)
+        corrlenx_chi, corrleny_chi = _parse_corrlen(corrlen_chi, coord_names)
+        cx, cy = coord_names
+        x_obs = ds[cx].values
+        y_obs = ds[cy].values
+        u_obs = ds[u_var].values
+        v_obs = ds[v_var].values
+        Xg, Yg, dims, coords = _extract_grid(target, cx, cy)
+        psi_error, chi_error = _helmholtz_error(
+            Xg, Yg, x_obs, y_obs, u_obs, v_obs,
+            corrlenx_psi=corrlenx_psi, corrleny_psi=corrleny_psi,
+            corrlenx_chi=corrlenx_chi, corrleny_chi=corrleny_chi,
+            err=err, b=b, backend=backend,
+        )
         return xr.Dataset(
-            {"psi": (dims, psi), "chi": (dims, chi)},
+            {
+                "psi_error": (dims, np.asarray(psi_error)),
+                "chi_error": (dims, np.asarray(chi_error)),
+            },
             coords=coords,
         )
