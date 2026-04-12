@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xobjmap"
-version = "0.0.1"
+version = "0.1.0"
 description = "Xarray-native objective mapping and interpolation of scattered observations"
 readme = "README.md"
 license = "MIT"
@@ -66,7 +66,7 @@ default = { solve-group = "default" }
 test = { features = ["test"], solve-group = "default" }
 test-jax = { features = ["test", "jax"], solve-group = "jax" }
 test-jax-cuda = { features = ["test", "jax-cuda"], solve-group = "jax-cuda" }
-docs = { features = ["docs"], solve-group = "default" }
+docs = { features = ["docs", "jax"], solve-group = "jax" }
 
 [tool.pixi.tasks]
 test = "pytest"

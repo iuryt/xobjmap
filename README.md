@@ -64,9 +64,18 @@ obs_vel = xr.Dataset(
     {"u": ("station", u_data), "v": ("station", v_data)},
     coords={"lon": ("station", lons), "lat": ("station", lats)},
 )
-psi = obs_vel.xobjmap.streamfunction(
+result_psi = obs_vel.xobjmap.streamfunction(
     "u", "v", target, corrlen={"lon": 1.0, "lat": 0.5}, err=0.1
 )
+result_psi.psi        # streamfunction
+result_psi.psi_error  # normalized posterior error
+
+# Velocity potential recovery
+result_chi = obs_vel.xobjmap.velocity_potential(
+    "u", "v", target, corrlen={"lon": 1.0, "lat": 0.5}, err=0.1
+)
+result_chi.chi        # velocity potential
+result_chi.chi_error  # normalized posterior error
 
 # Helmholtz decomposition → streamfunction + velocity potential
 result = obs_vel.xobjmap.helmholtz(
@@ -77,20 +86,100 @@ result = obs_vel.xobjmap.helmholtz(
 )
 result.psi  # streamfunction
 result.chi  # velocity potential
+result.psi_error  # normalized posterior error for psi
+result.chi_error  # normalized posterior error for chi
+
+# Skip error computation when only the field is needed
+fast = obs.xobjmap.scalar(
+    "temp", target, corrlen={"lon": 1.0, "lat": 0.5}, err=0.1,
+    return_error=False,
+)
 ```
 
 The low-level functions are also available directly:
 ```python
 tp = xobjmap.scalar(xc, yc, x, y, t, corrlenx=1.0, corrleny=0.5, err=0.1)
-ep = xobjmap.error(xc, yc, x, y, corrlenx=1.0, corrleny=0.5, err=0.1)
+ep = xobjmap.scalar_error(xc, yc, x, y, corrlenx=1.0, corrleny=0.5, err=0.1)
 psi = xobjmap.streamfunction(xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1)
+psi_err = xobjmap.streamfunction_error(
+    xc, yc, x, y, corrlenx=1.0, corrleny=0.5, err=0.1
+)
 chi = xobjmap.velocity_potential(xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1)
+chi_err = xobjmap.velocity_potential_error(
+    xc, yc, x, y, corrlenx=1.0, corrleny=0.5, err=0.1
+)
 psi, chi = xobjmap.helmholtz(xc, yc, x, y, u, v,
     corrlenx_psi=1.0, corrleny_psi=0.5,
     corrlenx_chi=1.0, corrleny_chi=0.5, err=0.1)
+psi_err, chi_err = xobjmap.helmholtz_error(
+    xc, yc, x, y,
+    corrlenx_psi=1.0, corrleny_psi=0.5,
+    corrlenx_chi=1.0, corrleny_chi=0.5, err=0.1
+)
 ```
 
 All functions accept `backend="jax"` for lower memory usage and optional GPU acceleration (requires `pip install 'xobjmap[jax]'`).
+
+## Benchmarking
+
+For large 3-D Helmholtz comparisons, use the dedicated benchmark script:
+
+```bash
+pixi run -e test-jax-cuda python examples/benchmark_helmholtz_3d.py
+```
+
+That script benchmarks the accessor N-D Helmholtz path with
+`interp_dims=('x', 'y', 'z')` and defaults to comparing dense NumPy against
+JAX on CUDA.
+
+Useful runs:
+
+```bash
+# NumPy vs JAX GPU on a moderate 3-D target
+pixi run -e test-jax-cuda python examples/benchmark_helmholtz_3d.py \
+  --sizes 900 1400 2000 --nx 80 --ny 80 --nz 3
+
+# Larger sweep; NumPy is skipped automatically when the dense lower-bound
+# estimate exceeds --max-dense-gb
+pixi run -e test-jax-cuda python examples/benchmark_helmholtz_3d.py \
+  --sizes 1000 3000 10000 --nx 100 --ny 100 --nz 5
+
+# GPU-only scaling once dense NumPy becomes impractical
+pixi run -e test-jax-cuda python examples/benchmark_helmholtz_3d.py \
+  --backends jax-gpu --sizes 2000 3000 4000 6000
+```
+
+The reported dense NumPy memory is only a lower-bound estimate for the
+dominant arrays. Real process RSS can be substantially larger because of
+temporaries, solve workspace, and allocator overhead.
+
+To save results for plotting or PR summaries:
+
+```bash
+pixi run -e test-jax-cuda python examples/benchmark_helmholtz_3d.py \
+  --sizes 900 1400 2000 --json /tmp/helmholtz3d.json --csv /tmp/helmholtz3d.csv
+```
+
+## Error model
+
+`xobjmap` exposes normalized posterior error estimates alongside the mapped
+fields.
+
+- `scalar_error` and `ds.xobjmap.scalar(...).error` are normalized mean squared
+  interpolation errors for scalar objective analysis.
+- `streamfunction_error`, `velocity_potential_error`, and `helmholtz_error`
+  return normalized posterior errors for the recovered latent potential fields.
+- These error fields depend on observation geometry, correlation scales, and
+  backend, but not on the observed scalar values themselves.
+
+Backend note:
+
+- NumPy computes the direct Bretherton solve.
+- JAX computes the fields with a matrix-free conjugate-gradient solve.
+- JAX avoids global dense observation-covariance assembly.
+- JAX scalar and potential error fields use local-neighborhood solves
+  (`k_local`) instead of global dense posterior solves, so they are expected
+  to be close but not exactly identical to the NumPy error fields.
 
 ## References
 

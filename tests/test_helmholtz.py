@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from xobjmap import helmholtz
+from xobjmap import helmholtz, helmholtz_error
 
 
 def test_helmholtz_returns_correct_shapes(backend):
@@ -97,3 +97,28 @@ def test_helmholtz_recovers_velocities(backend):
     nrmse_v = np.sqrt(np.mean((v_recon - v_true)**2)) / np.sqrt(np.mean(v_true**2))
     assert nrmse_u < 0.3, f"u nRMSE = {nrmse_u:.3f}"
     assert nrmse_v < 0.3, f"v nRMSE = {nrmse_v:.3f}"
+
+
+def test_helmholtz_error_returns_bounded_fields(backend):
+    """helmholtz_error should return bounded psi and chi errors."""
+    gx, gy = np.meshgrid(np.linspace(-4, 4, 9), np.linspace(-4, 4, 7))
+
+    rng = np.random.default_rng(42)
+    x = rng.uniform(-3, 3, 25)
+    y = rng.uniform(-3, 3, 25)
+    u = rng.standard_normal(25)
+    v = rng.standard_normal(25)
+
+    psi_error, chi_error = helmholtz_error(
+        gx, gy, x, y,
+        corrlenx_psi=2.5, corrleny_psi=2.5,
+        corrlenx_chi=2.5, corrleny_chi=2.5,
+        err=0.1, backend=backend,
+    )
+
+    assert psi_error.shape == gx.shape
+    assert chi_error.shape == gx.shape
+    assert np.all(psi_error >= 0)
+    assert np.all(psi_error <= 1)
+    assert np.all(chi_error >= 0)
+    assert np.all(chi_error <= 1)
