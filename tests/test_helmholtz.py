@@ -110,7 +110,7 @@ def test_helmholtz_error_returns_bounded_fields(backend):
     v = rng.standard_normal(25)
 
     psi_error, chi_error = helmholtz_error(
-        gx, gy, x, y, u, v,
+        gx, gy, x, y,
         corrlenx_psi=2.5, corrleny_psi=2.5,
         corrlenx_chi=2.5, corrleny_chi=2.5,
         err=0.1, backend=backend,

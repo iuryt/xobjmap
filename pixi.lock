@@ -2058,8 +2058,8 @@ packages:
   requires_python: '>=3.11'
 - pypi: ./
   name: xobjmap
-  version: 0.0.1
-  sha256: 5f0138fa1cb9de6e0ba8f999ef2e89fd06ff7607971b62a429701fb4e462372b
+  version: 0.1.0
+  sha256: 4c8c8deaa32bcff26d86be507136a3245d40651364690163d7bf558356d775c4
   requires_dist:
   - numpy>=1.22
   - scipy>=1.9

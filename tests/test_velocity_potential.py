@@ -86,7 +86,7 @@ def test_velocity_potential_error_returns_bounded_field(backend):
     v = rng.standard_normal(25)
 
     chi_error = velocity_potential_error(
-        gx, gy, x, y, u, v,
+        gx, gy, x, y,
         corrlenx=2.5, corrleny=2.5,
         err=0.1, backend=backend,
     )

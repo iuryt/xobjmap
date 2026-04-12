@@ -102,23 +102,63 @@ tp = xobjmap.scalar(xc, yc, x, y, t, corrlenx=1.0, corrleny=0.5, err=0.1)
 ep = xobjmap.scalar_error(xc, yc, x, y, corrlenx=1.0, corrleny=0.5, err=0.1)
 psi = xobjmap.streamfunction(xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1)
 psi_err = xobjmap.streamfunction_error(
-    xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1
+    xc, yc, x, y, corrlenx=1.0, corrleny=0.5, err=0.1
 )
 chi = xobjmap.velocity_potential(xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1)
 chi_err = xobjmap.velocity_potential_error(
-    xc, yc, x, y, u, v, corrlenx=1.0, corrleny=0.5, err=0.1
+    xc, yc, x, y, corrlenx=1.0, corrleny=0.5, err=0.1
 )
 psi, chi = xobjmap.helmholtz(xc, yc, x, y, u, v,
     corrlenx_psi=1.0, corrleny_psi=0.5,
     corrlenx_chi=1.0, corrleny_chi=0.5, err=0.1)
 psi_err, chi_err = xobjmap.helmholtz_error(
-    xc, yc, x, y, u, v,
+    xc, yc, x, y,
     corrlenx_psi=1.0, corrleny_psi=0.5,
     corrlenx_chi=1.0, corrleny_chi=0.5, err=0.1
 )
 ```
 
 All functions accept `backend="jax"` for lower memory usage and optional GPU acceleration (requires `pip install 'xobjmap[jax]'`).
+
+## Benchmarking
+
+For large 3-D Helmholtz comparisons, use the dedicated benchmark script:
+
+```bash
+pixi run -e test-jax-cuda python examples/benchmark_helmholtz_3d.py
+```
+
+That script benchmarks the accessor N-D Helmholtz path with
+`interp_dims=('x', 'y', 'z')` and defaults to comparing dense NumPy against
+JAX on CUDA.
+
+Useful runs:
+
+```bash
+# NumPy vs JAX GPU on a moderate 3-D target
+pixi run -e test-jax-cuda python examples/benchmark_helmholtz_3d.py \
+  --sizes 900 1400 2000 --nx 80 --ny 80 --nz 3
+
+# Larger sweep; NumPy is skipped automatically when the dense lower-bound
+# estimate exceeds --max-dense-gb
+pixi run -e test-jax-cuda python examples/benchmark_helmholtz_3d.py \
+  --sizes 1000 3000 10000 --nx 100 --ny 100 --nz 5
+
+# GPU-only scaling once dense NumPy becomes impractical
+pixi run -e test-jax-cuda python examples/benchmark_helmholtz_3d.py \
+  --backends jax-gpu --sizes 2000 3000 4000 6000
+```
+
+The reported dense NumPy memory is only a lower-bound estimate for the
+dominant arrays. Real process RSS can be substantially larger because of
+temporaries, solve workspace, and allocator overhead.
+
+To save results for plotting or PR summaries:
+
+```bash
+pixi run -e test-jax-cuda python examples/benchmark_helmholtz_3d.py \
+  --sizes 900 1400 2000 --json /tmp/helmholtz3d.json --csv /tmp/helmholtz3d.csv
+```
 
 ## Error model
 
@@ -136,9 +176,10 @@ Backend note:
 
 - NumPy computes the direct Bretherton solve.
 - JAX computes the fields with a matrix-free conjugate-gradient solve.
-- JAX scalar and potential error fields use a local-neighborhood approximation
-  (`k_local`) instead of a full dense solve, so they are expected to be close
-  but not exactly identical to the NumPy error fields.
+- JAX avoids global dense observation-covariance assembly.
+- JAX scalar and potential error fields use local-neighborhood solves
+  (`k_local`) instead of global dense posterior solves, so they are expected
+  to be close but not exactly identical to the NumPy error fields.
 
 ## References
 

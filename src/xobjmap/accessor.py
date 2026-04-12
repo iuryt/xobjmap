@@ -257,6 +257,7 @@ class XobjmapAccessor:
         coord_units=None,
         backend="numpy",
         return_error=True,
+        k_local=None,
     ):
         """Scalar objective analysis of a variable onto target locations."""
         ds = self._ds
@@ -272,7 +273,8 @@ class XobjmapAccessor:
 
         if return_error:
             ep = scalar_error_fn(
-                geom["target_points"], geom["obs_points"], corrlen_values, err
+                geom["target_points"], geom["obs_points"], corrlen_values, err,
+                k_local=k_local,
             )
             data_vars["error"] = (
                 geom["output_dims"],
@@ -282,7 +284,8 @@ class XobjmapAccessor:
         return xr.Dataset(data_vars, coords=geom["output_coords"])
 
     def scalar_error(
-        self, target, corrlen, err, interp_dims=None, coord_units=None, backend="numpy"
+        self, target, corrlen, err, interp_dims=None, coord_units=None,
+        backend="numpy", k_local=None,
     ):
         """Return only scalar interpolation error for the target grid."""
         ds = self._ds
@@ -290,7 +293,8 @@ class XobjmapAccessor:
         corrlen_values = _parse_corrlen(corrlen, geom["interp_dims"])
         _, scalar_error_fn = _scalar_impl(backend)
         ep = scalar_error_fn(
-            geom["target_points"], geom["obs_points"], corrlen_values, err
+            geom["target_points"], geom["obs_points"], corrlen_values, err,
+            k_local=k_local,
         )
         return xr.Dataset(
             {"error": (geom["output_dims"], np.asarray(ep).reshape(geom["target_shape"]))},
@@ -310,6 +314,7 @@ class XobjmapAccessor:
         b=0,
         backend="numpy",
         return_error=True,
+        k_local=None,
     ):
         """Recover the streamfunction from scattered velocity observations."""
         ds = self._ds
@@ -340,6 +345,7 @@ class XobjmapAccessor:
                 derivative_indices,
                 err,
                 b=b,
+                k_local=k_local,
             )
             data_vars["psi_error"] = (
                 geom["output_dims"],
@@ -360,6 +366,7 @@ class XobjmapAccessor:
         coord_units=None,
         b=0,
         backend="numpy",
+        k_local=None,
     ):
         """Return only streamfunction posterior error for the target grid."""
         ds = self._ds
@@ -376,6 +383,7 @@ class XobjmapAccessor:
             derivative_indices,
             err,
             b=b,
+            k_local=k_local,
         )
         return xr.Dataset(
             {"psi_error": (geom["output_dims"], np.asarray(psi_error).reshape(geom["target_shape"]))},
@@ -395,6 +403,7 @@ class XobjmapAccessor:
         b=0,
         backend="numpy",
         return_error=True,
+        k_local=None,
     ):
         """Recover the velocity potential from scattered velocity observations."""
         ds = self._ds
@@ -425,6 +434,7 @@ class XobjmapAccessor:
                 derivative_indices,
                 err,
                 b=b,
+                k_local=k_local,
             )
             data_vars["chi_error"] = (
                 geom["output_dims"],
@@ -445,6 +455,7 @@ class XobjmapAccessor:
         coord_units=None,
         b=0,
         backend="numpy",
+        k_local=None,
     ):
         """Return only velocity-potential posterior error for the target grid."""
         ds = self._ds
@@ -461,6 +472,7 @@ class XobjmapAccessor:
             derivative_indices,
             err,
             b=b,
+            k_local=k_local,
         )
         return xr.Dataset(
             {"chi_error": (geom["output_dims"], np.asarray(chi_error).reshape(geom["target_shape"]))},
@@ -481,6 +493,7 @@ class XobjmapAccessor:
         b=0,
         backend="numpy",
         return_error=True,
+        k_local=None,
     ):
         """Recover streamfunction and velocity potential from scattered observations."""
         ds = self._ds
@@ -517,6 +530,7 @@ class XobjmapAccessor:
                 derivative_indices,
                 err,
                 b=b,
+                k_local=k_local,
             )
             data_vars["psi_error"] = (
                 geom["output_dims"],
@@ -542,6 +556,7 @@ class XobjmapAccessor:
         coord_units=None,
         b=0,
         backend="numpy",
+        k_local=None,
     ):
         """Return only Helmholtz posterior errors for the target grid."""
         ds = self._ds
@@ -560,6 +575,7 @@ class XobjmapAccessor:
             derivative_indices,
             err,
             b=b,
+            k_local=k_local,
         )
         return xr.Dataset(
             {

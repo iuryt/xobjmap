@@ -725,6 +725,115 @@ def test_accessors_support_covariance_only_z_dim_for_vector_methods(backend):
     assert result.chi_error.dims == ("z", "y", "x")
 
 
+@pytest.mark.skipif(importlib.util.find_spec("jax") is None, reason="jax not installed")
+def test_vector_accessors_forward_k_local_for_jax_errors():
+    """JAX vector accessor errors should honor k_local without changing fields."""
+    rng = np.random.default_rng(42)
+    n = 80
+    x_obs = rng.uniform(-2.5, 2.5, n)
+    y_obs = rng.uniform(-2.0, 2.0, n)
+    z_obs = rng.choice(np.array([-1.0, 0.0, 1.0]), size=n)
+    amp = 1.0 + 0.3 * z_obs
+    u_obs = -amp * np.sin(x_obs) * np.sin(y_obs)
+    v_obs = amp * np.cos(x_obs) * np.cos(y_obs)
+
+    obs = xr.Dataset(
+        {"u": ("obs", u_obs), "v": ("obs", v_obs)},
+        coords={"x": ("obs", x_obs), "y": ("obs", y_obs), "z": ("obs", z_obs)},
+    )
+    x = xr.DataArray(np.linspace(-2.0, 2.0, 12), dims="x")
+    y = xr.DataArray(np.linspace(-1.5, 1.5, 10), dims="y")
+    z = xr.DataArray(np.array([-1.0, 0.0, 1.0]), dims="z")
+    z3d, y3d, x3d = xr.broadcast(z, y, x)
+    target = xr.Dataset(coords={"x": x3d, "y": y3d, "z": z3d})
+
+    common = dict(
+        corrlen={"x": 1.0, "y": 1.0, "z": 0.4},
+        err=0.02,
+        derivative_dims=("x", "y"),
+        interp_dims=("x", "y", "z"),
+        backend="jax",
+    )
+
+    small = obs.xobjmap.velocity_potential(
+        "u", "v", target, k_local=8, **common
+    )
+    large = obs.xobjmap.velocity_potential(
+        "u", "v", target, k_local=30, **common
+    )
+    only_small = obs.xobjmap.velocity_potential_error(
+        "u", "v", target, k_local=8, **common
+    )
+    only_large = obs.xobjmap.velocity_potential_error(
+        "u", "v", target, k_local=30, **common
+    )
+
+    np.testing.assert_allclose(small.chi.values, large.chi.values, atol=1e-5, rtol=1e-5)
+    assert np.max(np.abs(small.chi_error.values - large.chi_error.values)) > 1e-6
+    np.testing.assert_allclose(small.chi_error.values, only_small.chi_error.values)
+    np.testing.assert_allclose(large.chi_error.values, only_large.chi_error.values)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("jax") is None, reason="jax not installed")
+def test_helmholtz_accessor_forwards_k_local_for_jax_errors():
+    """JAX Helmholtz accessor errors should honor k_local without changing fields."""
+    rng = np.random.default_rng(42)
+    n = 90
+    x_obs = rng.uniform(-2.0, 2.0, n)
+    y_obs = rng.uniform(-2.0, 2.0, n)
+    z_obs = rng.choice(np.array([-1.0, 1.0]), size=n)
+    amp = 1.0 + 0.25 * z_obs
+    u_obs = amp * (
+        np.sin(x_obs) * np.sin(y_obs)
+        - 0.35 * np.sin(0.7 * x_obs) * np.sin(1.1 * y_obs)
+    )
+    v_obs = amp * (
+        np.cos(x_obs) * np.cos(y_obs)
+        + 0.55 * np.cos(0.7 * x_obs) * np.cos(1.1 * y_obs)
+    )
+
+    obs = xr.Dataset(
+        {"u": ("obs", u_obs), "v": ("obs", v_obs)},
+        coords={"x": ("obs", x_obs), "y": ("obs", y_obs), "z": ("obs", z_obs)},
+    )
+    x = xr.DataArray(np.linspace(-1.5, 1.5, 10), dims="x")
+    y = xr.DataArray(np.linspace(-1.5, 1.5, 9), dims="y")
+    z = xr.DataArray(np.array([-1.0, 1.0]), dims="z")
+    z3d, y3d, x3d = xr.broadcast(z, y, x)
+    target = xr.Dataset(coords={"x": x3d, "y": y3d, "z": z3d})
+
+    common = dict(
+        corrlen_psi={"x": 1.0, "y": 1.0, "z": 0.35},
+        corrlen_chi={"x": 1.0, "y": 1.0, "z": 0.35},
+        err=0.02,
+        derivative_dims=("x", "y"),
+        interp_dims=("x", "y", "z"),
+        backend="jax",
+    )
+
+    small = obs.xobjmap.helmholtz(
+        "u", "v", target, k_local=8, **common
+    )
+    large = obs.xobjmap.helmholtz(
+        "u", "v", target, k_local=24, **common
+    )
+    only_small = obs.xobjmap.helmholtz_error(
+        "u", "v", target, k_local=8, **common
+    )
+    only_large = obs.xobjmap.helmholtz_error(
+        "u", "v", target, k_local=24, **common
+    )
+
+    np.testing.assert_allclose(small.psi.values, large.psi.values, atol=1e-5, rtol=1e-5)
+    np.testing.assert_allclose(small.chi.values, large.chi.values, atol=1e-5, rtol=1e-5)
+    assert np.max(np.abs(small.psi_error.values - large.psi_error.values)) > 1e-6
+    assert np.max(np.abs(small.chi_error.values - large.chi_error.values)) > 1e-6
+    np.testing.assert_allclose(small.psi_error.values, only_small.psi_error.values)
+    np.testing.assert_allclose(small.chi_error.values, only_small.chi_error.values)
+    np.testing.assert_allclose(large.psi_error.values, only_large.psi_error.values)
+    np.testing.assert_allclose(large.chi_error.values, only_large.chi_error.values)
+
+
 def test_velocity_potential_xyz_tracks_z_varying_amplitude(backend):
     """Recovered velocity-potential slices should track the imposed z-varying amplitude ordering."""
     rng = np.random.default_rng(42)
@@ -799,12 +908,16 @@ def test_small_extra_dim_corrlen_preserves_slice_separation_in_streamfunction():
         backend="numpy",
     )
 
-    small_gap = abs(
-        float(small.psi.isel(z=0).mean()) - float(small.psi.isel(z=1).mean())
-    )
-    large_gap = abs(
-        float(large.psi.isel(z=0).mean()) - float(large.psi.isel(z=1).mean())
-    )
+    # RMS difference between z-slices: with small corrlen, opposite-sign
+    # vortices at the two z-levels are independently recovered, so the
+    # difference is large.  With large corrlen, mixed velocities cancel
+    # in the solver, dampening the reconstruction at both levels.
+    small_gap = float(np.sqrt(np.mean(
+        (small.psi.isel(z=0).values - small.psi.isel(z=1).values) ** 2
+    )))
+    large_gap = float(np.sqrt(np.mean(
+        (large.psi.isel(z=0).values - large.psi.isel(z=1).values) ** 2
+    )))
     assert small_gap > large_gap
 
 
@@ -856,6 +969,52 @@ def test_small_time_corrlen_preserves_slice_separation_in_helmholtz():
         float(large.chi.isel(time=0).mean()) - float(large.chi.isel(time=1).mean())
     )
     assert small_gap > large_gap
+
+
+def test_extra_dim_covariance_decouples_well_separated_z_slices():
+    """Obs at same (x,y) but far apart in z should be nearly uncorrelated
+    when z corrlen is small.  Regression test for the obs-obs covariance
+    using total_d2 (all dims) rather than spatial_d2 (derivative dims only)
+    in the Gaussian kernel."""
+    rng = np.random.default_rng(42)
+    n_per_z = 40
+    x_obs = np.tile(rng.uniform(-2, 2, n_per_z), 2)
+    y_obs = np.tile(rng.uniform(-2, 2, n_per_z), 2)
+    z_obs = np.concatenate([np.zeros(n_per_z), np.full(n_per_z, 100.0)])
+
+    # Opposite-sign vortex at each z-level
+    amp = np.where(z_obs == 0.0, 1.0, -1.0)
+    u_obs = amp * y_obs
+    v_obs = -amp * x_obs
+
+    obs = xr.Dataset(
+        {"u": ("obs", u_obs), "v": ("obs", v_obs)},
+        coords={"x": ("obs", x_obs), "y": ("obs", y_obs), "z": ("obs", z_obs)},
+    )
+
+    x = xr.DataArray(np.linspace(-1.5, 1.5, 10), dims="x")
+    y = xr.DataArray(np.linspace(-1.5, 1.5, 8), dims="y")
+    z = xr.DataArray(np.array([0.0, 100.0]), dims="z")
+    z3d, y3d, x3d = xr.broadcast(z, y, x)
+    target = xr.Dataset(coords={"x": x3d, "y": y3d, "z": z3d})
+
+    result = obs.xobjmap.streamfunction(
+        "u", "v", target,
+        corrlen={"x": 2.0, "y": 2.0, "z": 5.0},
+        err=0.02,
+        derivative_dims=("x", "y"),
+        interp_dims=("x", "y", "z"),
+        backend="numpy",
+    )
+
+    # The two z-levels have opposite-sign vortices.
+    # With correct obs-obs covariance (decaying with z), the solver
+    # should recover opposite-sign psi at each level.
+    mean_z0 = float(result.psi.isel(z=0).mean())
+    mean_z1 = float(result.psi.isel(z=1).mean())
+    assert mean_z0 * mean_z1 < 0, (
+        f"Expected opposite signs at z=0 ({mean_z0:.4f}) and z=100 ({mean_z1:.4f})"
+    )
 
 
 def test_vector_methods_validate_derivative_dims():
@@ -991,8 +1150,6 @@ def test_nd_accessor_matches_legacy_2d_public_functions():
         gy,
         obs.x.values,
         obs.y.values,
-        obs.u.values,
-        obs.v.values,
         corrlenx_psi=1.5,
         corrleny_psi=1.5,
         corrlenx_chi=1.5,
